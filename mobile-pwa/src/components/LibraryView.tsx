@@ -10,6 +10,8 @@ import {
   AlertCircle,
   Play,
   Bookmark as BookmarkIcon,
+  HelpCircle,
+  X,
 } from 'lucide-react';
 import { InstallPrompt } from './InstallPrompt';
 
@@ -41,7 +43,9 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   isStandalone,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const allFilesInputRef = useRef<HTMLInputElement>(null);
   const [bookToDelete, setBookToDelete] = useState<Book | null>(null);
+  const [showMemoryHelp, setShowMemoryHelp] = useState(false);
 
   // Filter books by search query
   const filteredBooks = books.filter(
@@ -59,9 +63,43 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     if (file) {
       onImportFile(file);
     }
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+    if (e.target) {
+      e.target.value = '';
     }
+  };
+
+  const handleTriggerAddBook = async () => {
+    // Try modern File System Access API if supported (uses less RAM than legacy Android intents)
+    if (typeof window !== 'undefined' && 'showOpenFilePicker' in window) {
+      try {
+        const [handle] = await (window as any).showOpenFilePicker({
+          types: [
+            {
+              description: 'Books (PDF, EPUB, TXT)',
+              accept: {
+                'application/pdf': ['.pdf'],
+                'application/epub+zip': ['.epub'],
+                'text/plain': ['.txt'],
+              },
+            },
+          ],
+          multiple: false,
+        });
+        if (handle) {
+          const file = await handle.getFile();
+          if (file) {
+            onImportFile(file);
+            return;
+          }
+        }
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return; // User cancelled
+        // If not supported on mobile, fallback below
+      }
+    }
+
+    // Standard file input with clean extension filter
+    fileInputRef.current?.click();
   };
 
   return (
@@ -76,11 +114,18 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         gap: 20,
       }}
     >
-      {/* Hidden file picker */}
+      {/* Hidden file pickers: clean extension list to prevent Android media scanner memory spikes */}
       <input
         ref={fileInputRef}
         type="file"
-        accept=".pdf,.epub,.txt,application/pdf,application/epub+zip,text/plain"
+        accept=".pdf,.epub,.txt"
+        style={{ display: 'none' }}
+        onChange={handleFileInputChange}
+      />
+      <input
+        ref={allFilesInputRef}
+        type="file"
+        accept="*/*"
         style={{ display: 'none' }}
         onChange={handleFileInputChange}
       />
@@ -125,7 +170,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           {/* Add Book Button */}
           <button
             className="primary-btn"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={handleTriggerAddBook}
             disabled={isImporting}
             style={{ height: 44, padding: '0 16px', flexShrink: 0 }}
           >
@@ -317,14 +362,44 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                 Tap the button below to import PDF, EPUB, or TXT books from your phone. Books stay stored safely on your device for offline reading.
               </p>
             </div>
-            <button
-              className="primary-btn"
-              onClick={() => fileInputRef.current?.click()}
-              style={{ marginTop: 8 }}
-            >
-              <Plus size={18} />
-              <span>Import Your First Book</span>
-            </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, width: '100%', maxWidth: 280, marginTop: 6 }}>
+              <button
+                className="primary-btn"
+                onClick={handleTriggerAddBook}
+                style={{ width: '100%' }}
+              >
+                <Plus size={18} />
+                <span>Import Book (.pdf, .epub, .txt)</span>
+              </button>
+
+              <button
+                className="secondary-btn"
+                onClick={() => allFilesInputRef.current?.click()}
+                style={{ width: '100%', fontSize: 13 }}
+              >
+                <FileText size={16} />
+                <span>Select from All Files (*/*)</span>
+              </button>
+
+              <button
+                onClick={() => setShowMemoryHelp(true)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--text-muted)',
+                  fontSize: 12,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 4,
+                  cursor: 'pointer',
+                  padding: '6px 0',
+                }}
+              >
+                <HelpCircle size={13} />
+                <span>Low memory alert on your phone? Tap here</span>
+              </button>
+            </div>
           </div>
         ) : filteredBooks.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
@@ -475,6 +550,109 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                 <span>Delete</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Android Low Memory Troubleshooting Sheet */}
+      {showMemoryHelp && (
+        <div className="modal-overlay" onClick={() => setShowMemoryHelp(false)}>
+          <div className="bottom-sheet" onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <HelpCircle size={22} color="var(--accent-gold)" />
+                <h3 style={{ fontSize: 18, color: 'var(--text-secondary)', fontFamily: 'var(--font-display)' }}>
+                  Fixing &ldquo;Low Memory&rdquo; on Android
+                </h3>
+              </div>
+              <button className="icon-btn" onClick={() => setShowMemoryHelp(false)} aria-label="Close">
+                <X size={20} />
+              </button>
+            </div>
+
+            <p style={{ color: 'var(--text-primary)', marginBottom: 16, lineHeight: 1.5 }}>
+              The &ldquo;Unable to complete operation due to low memory&rdquo; alert is an Android system message when the phone has low free RAM when opening the file picker. Here is how to fix it in 30 seconds:
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 20 }}>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <span style={{ 
+                  background: 'var(--accent-gold)', 
+                  color: '#141210', 
+                  width: 24, 
+                  height: 24, 
+                  borderRadius: '50%', 
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  fontWeight: 700, 
+                  fontSize: 12,
+                  flexShrink: 0 
+                }}>1</span>
+                <div>
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Close Heavy Background Apps</p>
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                    Swipe up on your phone to open recent apps and close heavy apps like WhatsApp, Camera, YouTube, or Games to free up RAM.
+                  </p>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <span style={{ 
+                  background: 'var(--accent-gold)', 
+                  color: '#141210', 
+                  width: 24, 
+                  height: 24, 
+                  borderRadius: '50%', 
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  fontWeight: 700, 
+                  fontSize: 12,
+                  flexShrink: 0 
+                }}>2</span>
+                <div>
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Try &ldquo;Select from All Files (*/*)&rdquo;</p>
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                    Tap the grey button above. It uses Android&apos;s generic file selector which consumes far less memory than the media scanner.
+                  </p>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <span style={{ 
+                  background: 'var(--accent-gold)', 
+                  color: '#141210', 
+                  width: 24, 
+                  height: 24, 
+                  borderRadius: '50%', 
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  fontWeight: 700, 
+                  fontSize: 12,
+                  flexShrink: 0 
+                }}>3</span>
+                <div>
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Check Developer Options (Most Common)</p>
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                    If you have Developer Options enabled in Android Settings, ensure <strong>&ldquo;Don&apos;t keep activities&rdquo;</strong> is turned <strong>OFF</strong>.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <button
+              className="primary-btn"
+              onClick={() => {
+                setShowMemoryHelp(false);
+                allFilesInputRef.current?.click();
+              }}
+              style={{ width: '100%' }}
+            >
+              <FileText size={18} />
+              <span>Try Selecting via All Files (*/*)</span>
+            </button>
           </div>
         </div>
       )}
