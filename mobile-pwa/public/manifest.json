@@ -1,0 +1,29 @@
+{
+  "name": "Book Reader Mobile",
+  "short_name": "BookReader",
+  "description": "Offline mobile reader for PDF, EPUB, and TXT books with instant reading resumption.",
+  "theme_color": "#1E1B16",
+  "background_color": "#141210",
+  "display": "standalone",
+  "orientation": "any",
+  "scope": "./",
+  "start_url": "./",
+  "icons": [
+    {
+      "src": "./icons/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "./icons/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "./icons/maskable-icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
