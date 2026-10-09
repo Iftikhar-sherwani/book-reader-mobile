@@ -1,10 +1,23 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import type { Book, ReadingProgress, Bookmark, ReaderSettings } from '../types';
-import { getBookBlob, getProgress, saveProgress, getBookmarks, saveBookmark, deleteBookmark, updateBookMetadata } from '../services/db';
+import type { Book, ReadingProgress, Bookmark, ReaderSettings, Mark } from '../types';
+import {
+  getBookBlob,
+  getProgress,
+  saveProgress,
+  getBookmarks,
+  saveBookmark,
+  deleteBookmark,
+  getMarks,
+  saveMark,
+  deleteMark,
+  updateBookMetadata,
+} from '../services/db';
+import { indexBook } from '../services/indexerService';
 import { PdfReader } from './PdfReader';
 import { EpubReader } from './EpubReader';
 import { TxtReader } from './TxtReader';
 import { BookmarksDrawer } from './BookmarksDrawer';
+import { MarksDrawer } from './MarksDrawer';
 import { JumpToPageModal } from './JumpToPageModal';
 import {
   ChevronLeft,
@@ -13,6 +26,7 @@ import {
   ZoomOut,
   Maximize2,
   Bookmark as BookmarkIcon,
+  Highlighter,
   AlertTriangle,
   Loader2,
   ArrowLeft,
@@ -24,6 +38,9 @@ interface ReaderViewProps {
   onBackToLibrary: () => void;
   isBookmarksOpen: boolean;
   onCloseBookmarks: () => void;
+  isMarksOpen?: boolean;
+  onCloseMarks?: () => void;
+  onOpenMarks?: () => void;
 }
 
 export const ReaderView: React.FC<ReaderViewProps> = ({
@@ -32,6 +49,9 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   onBackToLibrary,
   isBookmarksOpen,
   onCloseBookmarks,
+  isMarksOpen,
+  onCloseMarks,
+  onOpenMarks,
 }) => {
   const [blob, setBlob] = useState<Blob | null>(null);
   const [loading, setLoading] = useState(true);
@@ -47,6 +67,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   const [controlsVisible, setControlsVisible] = useState(true);
   const [isJumpModalOpen, setIsJumpModalOpen] = useState(false);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [marks, setMarks] = useState<Mark[]>([]);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const currentPageRef = useRef(currentPage);
@@ -73,17 +94,18 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     }, 2500);
   };
 
-  // 1. Load book blob, initial progress & bookmarks
+  // 1. Load book blob, initial progress, bookmarks & marks
   useEffect(() => {
     let mounted = true;
 
     const loadData = async () => {
       try {
         setLoading(true);
-        const [bookBlob, savedProgress, savedBookmarks] = await Promise.all([
+        const [bookBlob, savedProgress, savedBookmarks, savedMarks] = await Promise.all([
           getBookBlob(book.id),
           getProgress(book.id),
           getBookmarks(book.id),
+          getMarks(book.id),
         ]);
 
         if (!mounted) return;
@@ -96,6 +118,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
 
         setBlob(bookBlob);
         setBookmarks(savedBookmarks);
+        setMarks(savedMarks);
 
         // Restore automatically saved location
         if (savedProgress && savedProgress.pageIndex > 0) {
@@ -109,6 +132,11 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
         }
 
         setLoading(false);
+
+        // Index text in background for search
+        indexBook(book, bookBlob, {
+          onWarning: (msg) => showToast(`⚠️ ${msg}`),
+        });
       } catch (err: any) {
         if (mounted) {
           setError(err?.message || 'Failed to load book data.');
@@ -243,6 +271,53 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     setBookmarks(updated);
   };
 
+  // Mark handlers
+  const handleAddMark = async (
+    quote: string,
+    color: string,
+    note: string,
+    chapterIndex: number,
+    scrollY: number
+  ) => {
+    const newMark: Mark = {
+      id: crypto.randomUUID(),
+      bookId: book.id,
+      loc: `${chapterIndex}|${Math.round(scrollY)}`,
+      quote,
+      color,
+      note: note || undefined,
+      createdAt: Date.now(),
+    };
+    try {
+      await saveMark(newMark);
+      const updated = await getMarks(book.id);
+      setMarks(updated);
+      showToast('✦ Selection marked');
+    } catch (err) {
+      console.warn('Failed to save mark:', err);
+    }
+  };
+
+  const handleDeleteMark = async (id: string) => {
+    try {
+      await deleteMark(id);
+      const updated = await getMarks(book.id);
+      setMarks(updated);
+      showToast('Mark deleted');
+    } catch (err) {
+      console.warn('Failed to delete mark:', err);
+    }
+  };
+
+  const handleSelectMark = (m: Mark) => {
+    const parts = m.loc.split('|');
+    const ch = parseInt(parts[0], 10) || 1;
+    const scroll = parseFloat(parts[1]) || 0;
+    setCurrentPage(ch);
+    setScrollOffset(scroll);
+    if (onCloseMarks) onCloseMarks();
+  };
+
   // Zoom handlers
   const handleZoomIn = () => {
     setZoomMultiplier((prev) => Math.min(2.5, Math.round((prev + 0.2) * 10) / 10));
@@ -316,8 +391,10 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
           currentChapter={currentPage}
           initialScrollOffset={scrollOffset}
           settings={settings}
+          marks={marks}
           onPageCountLoaded={handlePageCountLoaded}
           onChapterChange={handleEpubChapterChange}
+          onAddMark={handleAddMark}
           onToggleControls={() => setControlsVisible(!controlsVisible)}
           onError={(err) => setError(err)}
         />
@@ -428,22 +505,45 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
             <div />
           )}
 
-          {/* Quick Bookmark Button */}
-          <button
-            className="secondary-btn"
-            onClick={handleAddBookmark}
-            style={{
-              height: 36,
-              padding: '0 12px',
-              fontSize: 12,
-              borderRadius: 10,
-              backgroundColor: 'rgba(26, 23, 20, 0.85)',
-              backdropFilter: 'blur(8px)',
-            }}
-          >
-            <BookmarkIcon size={14} color="var(--accent-gold)" />
-            <span>Bookmark Page</span>
-          </button>
+          {/* Action buttons: Marks & Bookmarks */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {onOpenMarks && (
+              <button
+                className="secondary-btn"
+                onClick={onOpenMarks}
+                style={{
+                  height: 36,
+                  padding: '0 12px',
+                  fontSize: 12,
+                  borderRadius: 10,
+                  backgroundColor: 'rgba(26, 23, 20, 0.85)',
+                  backdropFilter: 'blur(8px)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <Highlighter size={14} color="var(--accent-gold)" />
+                <span>Marks ({marks.length})</span>
+              </button>
+            )}
+
+            <button
+              className="secondary-btn"
+              onClick={handleAddBookmark}
+              style={{
+                height: 36,
+                padding: '0 12px',
+                fontSize: 12,
+                borderRadius: 10,
+                backgroundColor: 'rgba(26, 23, 20, 0.85)',
+                backdropFilter: 'blur(8px)',
+              }}
+            >
+              <BookmarkIcon size={14} color="var(--accent-gold)" />
+              <span>Bookmark Page</span>
+            </button>
+          </div>
         </div>
 
         {/* Primary Navigation Row: Prev | Page X/Y | Next */}
@@ -526,6 +626,17 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
           onAddBookmark={handleAddBookmark}
           onDeleteBookmark={handleDeleteBookmark}
           onClose={onCloseBookmarks}
+        />
+      )}
+
+      {/* Marks & Notes Drawer */}
+      {isMarksOpen && onCloseMarks && (
+        <MarksDrawer
+          book={book}
+          marks={marks}
+          onSelectMark={handleSelectMark}
+          onDeleteMark={handleDeleteMark}
+          onClose={onCloseMarks}
         />
       )}
 

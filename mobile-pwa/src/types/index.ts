@@ -49,6 +49,31 @@ export interface StorageStats {
   quotaBytes: number;
 }
 
+export interface Mark {
+  id: string;
+  bookId: string;
+  loc: string; // "chapterIndex|scrollY" for EPUB, or "pageNumber" for PDF/TXT
+  quote: string;
+  note?: string;
+  color: string; // "#FFF3B0" | "#B8E6C8" | "#B3D4FC" | "#F8BBD0"
+  createdAt: number;
+}
+
+export interface IndexedPage {
+  id?: number;
+  bookId: string;
+  loc: string;
+  text: string;
+}
+
+export interface SearchResult {
+  bookId: string;
+  bookTitle: string;
+  format: BookFormat;
+  loc: string;
+  snippet: string;
+}
+
 export interface BackupData {
   version: number;
   exportDate: string;
@@ -62,4 +87,6 @@ export interface BackupData {
   }[];
   progress: ReadingProgress[];
   bookmarks: Bookmark[];
+  marks?: Mark[];
 }
+

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import type { Book, ReadingProgress, ReaderSettings, BookFormat } from './types';
+import type { Book, ReadingProgress, ReaderSettings, BookFormat, SearchResult } from './types';
 import {
   getAllBooks,
   getAllProgress,
@@ -8,8 +8,11 @@ import {
   deleteBook,
   getSettings,
   saveSettings,
+  saveProgress,
+  getAllMarks,
   DEFAULT_SETTINGS,
 } from './services/db';
+import { exportAllBooksMarks } from './services/marksExporter';
 import { computeFileFingerprint } from './services/fingerprint';
 import { loadPdfDocument } from './services/pdfService';
 import { parseEpub } from './services/epubService';
@@ -19,6 +22,7 @@ import { LibraryView } from './components/LibraryView';
 import { ReaderView } from './components/ReaderView';
 import { SettingsModal } from './components/SettingsModal';
 import { DuplicateBookModal } from './components/DuplicateBookModal';
+import { SearchModal } from './components/SearchModal';
 
 export const App: React.FC = () => {
   const [books, setBooks] = useState<Book[]>([]);
@@ -29,6 +33,8 @@ export const App: React.FC = () => {
   // Modals & Drawers
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBookmarksOpen, setIsBookmarksOpen] = useState(false);
+  const [isMarksOpen, setIsMarksOpen] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [duplicateBook, setDuplicateBook] = useState<Book | null>(null);
 
   // Settings
@@ -256,6 +262,40 @@ export const App: React.FC = () => {
     handleUpdateSettings({ theme: nextTheme });
   };
 
+  // Export all marks across all books to Markdown
+  const handleExportAllMarks = async () => {
+    try {
+      const allMarks = await getAllMarks();
+      if (allMarks.length === 0) {
+        alert('No marks or highlights found across any books in your library.');
+        return;
+      }
+      exportAllBooksMarks(books, allMarks);
+    } catch (err) {
+      console.error('Failed to export all marks:', err);
+    }
+  };
+
+  // Jump to location when search result is clicked
+  const handleSelectSearchResult = (result: SearchResult) => {
+    setIsSearchOpen(false);
+    const targetBook = books.find((b) => b.id === result.bookId);
+    if (!targetBook) return;
+
+    const pageIndex = parseInt(result.loc, 10) || 1;
+    saveProgress({
+      bookId: targetBook.id,
+      location: String(pageIndex),
+      pageIndex,
+      scrollOffset: 0,
+      percentage: targetBook.pageCount > 0 ? (pageIndex / targetBook.pageCount) * 100 : 0,
+      updatedAt: Date.now(),
+    }).then(() => {
+      setCurrentBook(targetBook);
+      refreshLibrary();
+    });
+  };
+
   return (
     <div className="app-container">
       {/* Universal Header */}
@@ -271,6 +311,8 @@ export const App: React.FC = () => {
           refreshLibrary();
         }}
         onOpenBookmarks={() => setIsBookmarksOpen(true)}
+        onOpenMarks={() => setIsMarksOpen(true)}
+        onOpenSearch={() => setIsSearchOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onApplyUpdate={handleApplyUpdate}
         onToggleTheme={handleToggleTheme}
@@ -287,6 +329,9 @@ export const App: React.FC = () => {
           }}
           isBookmarksOpen={isBookmarksOpen}
           onCloseBookmarks={() => setIsBookmarksOpen(false)}
+          isMarksOpen={isMarksOpen}
+          onCloseMarks={() => setIsMarksOpen(false)}
+          onOpenMarks={() => setIsMarksOpen(true)}
         />
       ) : (
         <LibraryView
@@ -297,10 +342,20 @@ export const App: React.FC = () => {
           onSelectBook={(book) => setCurrentBook(book)}
           onImportFile={handleImportFile}
           onDeleteBook={handleDeleteBook}
+          onExportAllMarks={handleExportAllMarks}
           isImporting={isImporting}
           importError={importError}
           deferredPrompt={deferredPrompt}
           isStandalone={isStandalone}
+        />
+      )}
+
+      {/* Full-Text Search Modal */}
+      {isSearchOpen && (
+        <SearchModal
+          currentBook={currentBook}
+          onSelectResult={handleSelectSearchResult}
+          onClose={() => setIsSearchOpen(false)}
         />
       )}
 

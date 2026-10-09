@@ -12,6 +12,7 @@ import {
   Bookmark as BookmarkIcon,
   HelpCircle,
   X,
+  Download,
 } from 'lucide-react';
 import { InstallPrompt } from './InstallPrompt';
 
@@ -23,6 +24,7 @@ interface LibraryViewProps {
   onSelectBook: (book: Book) => void;
   onImportFile: (file: File) => void;
   onDeleteBook: (book: Book) => void;
+  onExportAllMarks?: () => void;
   isImporting: boolean;
   importError?: string | null;
   deferredPrompt: any;
@@ -37,6 +39,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   onSelectBook,
   onImportFile,
   onDeleteBook,
+  onExportAllMarks,
   isImporting,
   importError,
   deferredPrompt,
@@ -177,6 +180,32 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             <Plus size={18} />
             <span style={{ display: 'inline' }}>Add Book</span>
           </button>
+
+          {/* Export All Marks Button */}
+          {onExportAllMarks && (
+            <button
+              className="secondary-btn"
+              onClick={onExportAllMarks}
+              title="Export all book marks to Markdown"
+              aria-label="Export all marks"
+              style={{
+                height: 44,
+                padding: '0 12px',
+                borderRadius: 12,
+                fontSize: 12,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                backgroundColor: 'rgba(212, 175, 85, 0.12)',
+                color: 'var(--accent-gold)',
+                border: '1px solid rgba(212, 175, 85, 0.35)',
+                flexShrink: 0,
+              }}
+            >
+              <Download size={16} />
+              <span style={{ display: 'inline' }}>Export Marks</span>
+            </button>
+          )}
         </div>
 
         {/* Install Prompt Button if available */}

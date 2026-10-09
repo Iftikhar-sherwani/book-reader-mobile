@@ -1,6 +1,7 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
-import type { ReaderSettings } from '../types';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import type { ReaderSettings, Mark } from '../types';
 import { parseEpub, type ParsedEpub } from '../services/epubService';
+import { MarkDialog } from './MarkDialog';
 import { Loader2 } from 'lucide-react';
 
 interface EpubReaderProps {
@@ -8,10 +9,35 @@ interface EpubReaderProps {
   currentChapter: number;
   initialScrollOffset: number;
   settings: ReaderSettings;
+  marks: Mark[];
   onPageCountLoaded: (count: number) => void;
   onChapterChange: (chapterIndex: number, scrollOffset: number) => void;
+  onAddMark: (quote: string, color: string, note: string, chapterIndex: number, scrollY: number) => void;
   onToggleControls: () => void;
   onError: (err: string) => void;
+}
+
+function applyHighlights(html: string, chapterMarks: Mark[]): string {
+  if (!chapterMarks || chapterMarks.length === 0) return html;
+  let result = html;
+  for (const m of chapterMarks) {
+    if (!m.quote || m.quote.trim().length === 0) continue;
+    const q = m.quote.trim();
+    const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    try {
+      // Replace text occurrence outside of html tags
+      const regex = new RegExp(`(?![^<]*>)(${escaped})`, 'i');
+      if (regex.test(result)) {
+        result = result.replace(
+          regex,
+          `<mark style="background-color: ${m.color}; color: #111; border-radius: 2px; padding: 1px 3px;">$1</mark>`
+        );
+      }
+    } catch {
+      // If regex errors, skip quietly without error
+    }
+  }
+  return result;
 }
 
 export const EpubReader: React.FC<EpubReaderProps> = ({
@@ -19,13 +45,18 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
   currentChapter,
   initialScrollOffset,
   settings,
+  marks,
   onPageCountLoaded,
   onChapterChange,
+  onAddMark,
   onToggleControls,
   onError,
 }) => {
   const [parsed, setParsed] = useState<ParsedEpub | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedQuote, setSelectedQuote] = useState<string | null>(null);
+  const [savedScrollY, setSavedScrollY] = useState<number>(0);
+
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const contentContainerRef = useRef<HTMLDivElement>(null);
 
@@ -70,7 +101,31 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
     onChapterChange(currentChapter, el.scrollTop);
   }, [currentChapter, onChapterChange]);
 
+  const handleSelection = () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const text = sel.toString().trim();
+    if (text.length >= 2) {
+      const scrollY = scrollContainerRef.current?.scrollTop || 0;
+      setSavedScrollY(scrollY);
+      setSelectedQuote(text);
+    }
+  };
+
+  const handleSaveMark = (color: string, note: string) => {
+    if (selectedQuote) {
+      onAddMark(selectedQuote, color, note, currentChapter, savedScrollY);
+      setSelectedQuote(null);
+      window.getSelection()?.removeAllRanges();
+    }
+  };
+
   const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.toString().trim().length >= 2) {
+      return; // User was selecting text
+    }
+
     const rect = e.currentTarget.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const width = rect.width;
@@ -88,6 +143,14 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
 
     onToggleControls();
   };
+
+  // Filter marks for current chapter
+  const currentChapterMarks = useMemo(() => {
+    return marks.filter((m) => {
+      const parts = m.loc.split('|');
+      return parts[0] === String(currentChapter);
+    });
+  }, [marks, currentChapter]);
 
   if (loading) {
     return (
@@ -107,36 +170,52 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
   }
 
   const activeChapterIndex = Math.max(0, Math.min(currentChapter - 1, parsed.chapters.length - 1));
-  const chapter = parsed.chapters[activeChapterIndex];
+  const rawChapter = parsed.chapters[activeChapterIndex];
+  const highlightedContent = applyHighlights(rawChapter.content, currentChapterMarks);
 
   return (
-    <div
-      ref={scrollContainerRef}
-      onScroll={handleScroll}
-      onClick={handleContainerClick}
-      style={{
-        flex: 1,
-        width: '100%',
-        height: '100%',
-        overflowY: 'auto',
-        WebkitOverflowScrolling: 'touch',
-        backgroundColor: 'var(--bg-main)',
-        padding: '24px 20px calc(40px + var(--safe-bottom)) 20px',
-      }}
-    >
+    <>
       <div
-        ref={contentContainerRef}
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        onClick={handleContainerClick}
+        onMouseUp={handleSelection}
+        onTouchEnd={handleSelection}
         style={{
-          maxWidth: 680,
-          margin: '0 auto',
-          fontSize: `${settings.fontSize}px`,
-          lineHeight: settings.lineHeight,
-          fontFamily: settings.fontFamily === 'serif' ? 'var(--font-serif)' : 'var(--font-ui)',
-          color: 'var(--text-primary)',
-          userSelect: 'text',
+          flex: 1,
+          width: '100%',
+          height: '100%',
+          overflowY: 'auto',
+          WebkitOverflowScrolling: 'touch',
+          backgroundColor: 'var(--bg-main)',
+          padding: '24px 20px calc(40px + var(--safe-bottom)) 20px',
         }}
-        dangerouslySetInnerHTML={{ __html: chapter.content }}
-      />
-    </div>
+      >
+        <div
+          ref={contentContainerRef}
+          style={{
+            maxWidth: 680,
+            margin: '0 auto',
+            fontSize: `${settings.fontSize}px`,
+            lineHeight: settings.lineHeight,
+            fontFamily: settings.fontFamily === 'serif' ? 'var(--font-serif)' : 'var(--font-ui)',
+            color: 'var(--text-primary)',
+            userSelect: 'text',
+          }}
+          dangerouslySetInnerHTML={{ __html: highlightedContent }}
+        />
+      </div>
+
+      {selectedQuote && (
+        <MarkDialog
+          quote={selectedQuote}
+          onSave={handleSaveMark}
+          onClose={() => {
+            setSelectedQuote(null);
+            window.getSelection()?.removeAllRanges();
+          }}
+        />
+      )}
+    </>
   );
 };

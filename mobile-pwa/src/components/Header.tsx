@@ -1,4 +1,3 @@
-import React from 'react';
 import {
   BookOpen,
   ArrowLeft,
@@ -9,6 +8,8 @@ import {
   RefreshCw,
   Sun,
   Moon,
+  Search,
+  Highlighter,
 } from 'lucide-react';
 import type { ReaderSettings } from '../types';
 
@@ -21,6 +22,8 @@ interface HeaderProps {
   settings: ReaderSettings;
   onBackToLibrary?: () => void;
   onOpenBookmarks?: () => void;
+  onOpenMarks?: () => void;
+  onOpenSearch?: () => void;
   onOpenSettings: () => void;
   onApplyUpdate?: () => void;
   onToggleTheme: () => void;
@@ -35,6 +38,8 @@ export const Header: React.FC<HeaderProps> = ({
   settings,
   onBackToLibrary,
   onOpenBookmarks,
+  onOpenMarks,
+  onOpenSearch,
   onOpenSettings,
   onApplyUpdate,
   onToggleTheme,
@@ -156,6 +161,30 @@ export const Header: React.FC<HeaderProps> = ({
         >
           {settings.theme === 'dark' ? <Sun size={19} /> : <Moon size={19} />}
         </button>
+
+        {/* Search button (always accessible) */}
+        {onOpenSearch && (
+          <button
+            className="icon-btn"
+            onClick={onOpenSearch}
+            aria-label="Search"
+            title="Search"
+          >
+            <Search size={19} />
+          </button>
+        )}
+
+        {/* Marks & Notes button in reading mode */}
+        {isReading && onOpenMarks && (
+          <button
+            className="icon-btn"
+            onClick={onOpenMarks}
+            aria-label="Marks & Notes"
+            title="Marks & Notes"
+          >
+            <Highlighter size={19} color="var(--accent-gold)" />
+          </button>
+        )}
 
         {/* Bookmarks button in reading mode */}
         {isReading && onOpenBookmarks && (
