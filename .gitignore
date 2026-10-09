@@ -1,20 +1,26 @@
-# Desktop application files & data (keep private)
-main.py
-requirements.txt
-core/
-ui/
+# Databases and user data
+*.db
+*.sqlite
 data/
-samples/
-assets/
+covers/
+
+# Build artifacts and binaries
 build/
 dist/
-test_fixtures/
-*.lnk
 *.spec
+*.lnk
+
+# Python cache & environment
 *.pyc
 __pycache__/
-
-# Environment & logs
 *.log
+.venv/
+venv/
+
+# System files
 .DS_Store
 Thumbs.db
+
+# Mobile PWA artifacts
+mobile-pwa/dist/
+mobile-pwa/node_modules/
