@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core import database
+from core import database, settings_manager
 from core.models import Highlight, SavedWord
 
 HIGHLIGHT_COLORS = {
@@ -172,6 +172,18 @@ class PdfPageView(QLabel):
             self.selecting = False
             self.update()
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            idx = self._word_at_pos(event.pos())
+            if idx is not None and idx < len(self.word_boxes):
+                word = self.word_boxes[idx]['word']
+                from ui.dictionary_dialog import DictionaryPopupDialog
+                dlg = DictionaryPopupDialog(word=word, parent=self)
+                dlg.exec()
+                return
+        super().mouseDoubleClickEvent(event)
+
 
     def contextMenuEvent(self, event):
         if not self.selected_text and self.word_boxes:
@@ -337,6 +349,7 @@ class ReaderWidget(QWidget):
         self._fit_width: bool = True
 
         self._epub_chapters: list[str] = []
+        self.theme: str = settings_manager.get_setting("theme", "Sepia")
 
         self._build_ui()
 
@@ -569,6 +582,13 @@ class ReaderWidget(QWidget):
         self.zoom_in_btn.setToolTip("Zoom In")
         self.zoom_in_btn.clicked.connect(self._zoom_in)
         zoom_layout.addWidget(self.zoom_in_btn)
+
+        self.finish_chap_btn = QPushButton("Finish chapter")
+        self.finish_chap_btn.setStyleSheet(zoom_btn_style)
+        self.finish_chap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.finish_chap_btn.setToolTip("Record an action step for this chapter/page")
+        self.finish_chap_btn.clicked.connect(self._on_finish_chapter_clicked)
+        zoom_layout.addWidget(self.finish_chap_btn)
 
         self.zoom_widget.hide()
         nav_layout.addWidget(self.zoom_widget)
@@ -813,7 +833,22 @@ class ReaderWidget(QWidget):
 
             scale = max(0.2, min(scale, 5.0))
             pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-            img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
+            img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+
+            # Apply theme tint for PDF (Feature 12)
+            theme = getattr(self, "theme", "Sepia")
+            if theme == "Dark":
+                img.invertPixels()
+                p = QPainter(img)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
+                p.fillRect(img.rect(), QColor(230, 220, 200))
+                p.end()
+            elif theme == "Sepia":
+                p = QPainter(img)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
+                p.fillRect(img.rect(), QColor(245, 236, 215))
+                p.end()
+
             qpix = QPixmap.fromImage(img)
 
             self.pdf_label.setPixmap(qpix)
@@ -845,6 +880,42 @@ class ReaderWidget(QWidget):
             return
         self._fit_width = True
         self._show_pdf_page()
+
+    def _on_finish_chapter_clicked(self) -> None:
+        """Trigger chapter action step dialog for PDF."""
+        from ui.action_dialog import ChapterActionDialog
+        book_title = ""
+        if self.book_id:
+            raw = db.get_book(self.book_id)
+            if raw:
+                book_title = raw.get("title", "")
+        dlg = ChapterActionDialog(
+            book_id=self.book_id or "",
+            loc=str(self._current_page),
+            book_title=book_title,
+            parent=self,
+        )
+        dlg.exec()
+
+    def set_theme(self, theme: str) -> None:
+        """Switch reading theme (Light, Sepia, Dark)."""
+        self.theme = theme
+        if self._is_epub:
+            self.epub_widget.set_theme(theme)
+        elif self._is_pdf:
+            self._show_pdf_page()
+        else:
+            self._show_current_page()
+
+    def set_font_size(self, size: int) -> None:
+        """Adjust font size for EPUB."""
+        if self._is_epub:
+            self.epub_widget.set_font_size(size)
+
+    def set_line_width(self, width: int) -> None:
+        """Adjust line width for EPUB."""
+        if self._is_epub:
+            self.epub_widget.set_line_width(width)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

@@ -1,19 +1,19 @@
-"""EPUB Reader Widget — renders each chapter in QWebEngineView with text marking.
+"""EPUB Reader Widget — renders each chapter in QWebEngineView with text marking, themes, font sizing, and dictionary lookup.
 
-Uses QWebChannel so JavaScript can send text selections to Python.
-On mouseup with selected text, shows the same MarkDialog popup as the PDF feature.
-Marks are saved with loc = "chapter_index|scroll_y" and quote = exact selected text.
-On chapter load, saved quotes are highlighted by wrapping them in colored spans.
+Uses QWebChannel so JavaScript can send text selections and double-clicks to Python.
+On mouseup with selected text, shows MarkDialog.
+On double-click, shows DictionaryPopupDialog.
+When advancing chapters, prompts with ChapterActionDialog.
 """
 
-import json
+from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QObject, QUrl, pyqtSignal, pyqtSlot, QTimer
+import json
+from PyQt6.QtCore import Qt, QObject, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -22,20 +22,45 @@ from PyQt6.QtWidgets import (
 )
 
 import db
+from core import settings_manager
 from ui.mark_dialog import MarkDialog
+from ui.dictionary_dialog import DictionaryPopupDialog
+from ui.action_dialog import ChapterActionDialog
 
-# ── Color palette (matches reader_widget.py) ──────────────────────────
-PAGE_BG = "#F5ECD7"
-PAGE_TEXT = "#2C2416"
-PAGE_BORDER = "#D4C5A0"
-SPINE_SHADOW = "#C4B38A"
-OUTER_BG = "#1E1B16"
+# Theme definitions
+THEMES = {
+    "Light": {
+        "bg": "#FFFFFF",
+        "text": "#222222",
+        "heading": "#111111",
+        "border": "#E5E5E5",
+        "outer_bg": "#F5F5F5",
+        "mark_text": "#111111",
+    },
+    "Sepia": {
+        "bg": "#F5ECD7",
+        "text": "#2C2416",
+        "heading": "#5C4A2A",
+        "border": "#D4C5A0",
+        "outer_bg": "#1E1B16",
+        "mark_text": "#1A1714",
+    },
+    "Dark": {
+        "bg": "#181818",
+        "text": "#E2DED7",
+        "heading": "#D4AF55",
+        "border": "#333333",
+        "outer_bg": "#121212",
+        "mark_text": "#111111",
+    },
+}
 
 
 class _EpubBridge(QObject):
     """QWebChannel bridge — JavaScript calls methods on this object."""
 
-    text_selected = pyqtSignal(str, float)  # (selected_text, scroll_y)
+    text_selected = pyqtSignal(str, float)   # (selected_text, scroll_y)
+    word_double_clicked = pyqtSignal(str)     # (word)
 
     @pyqtSlot(str, float)
     def on_text_selected(self, text: str, scroll_y: float) -> None:
@@ -43,29 +68,44 @@ class _EpubBridge(QObject):
         if text.strip():
             self.text_selected.emit(text.strip(), scroll_y)
 
+    @pyqtSlot(str)
+    def on_word_double_clicked(self, word: str) -> None:
+        """Called from JS when user double-clicks a word."""
+        if word.strip():
+            self.word_double_clicked.emit(word.strip())
+
 
 class EpubReaderWidget(QWidget):
     """Renders EPUB chapters one-at-a-time in a QWebEngineView.
 
     Signals:
         mark_added: emitted after a mark is saved (for sidebar refresh).
+        chapter_changed: emitted after navigating to another chapter.
     """
 
     mark_added = pyqtSignal()
+    chapter_changed = pyqtSignal(int, int)  # (current_chapter, total_chapters)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.book_id: str | None = None
+        self.book_title: str = ""
         self._chapters: list[str] = []
         self._current_chapter: int = 0
         self._pending_scroll_y: float = 0.0
+
+        # Load persisted settings
+        self.theme = settings_manager.get_setting("theme", "Sepia")
+        self.font_size = settings_manager.get_setting("font_size", 17)
+        self.line_width = settings_manager.get_setting("line_width", 720)
 
         self._build_ui()
 
     # ── UI construction ───────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.setStyleSheet(f"background: {OUTER_BG};")
+        outer_bg = THEMES.get(self.theme, THEMES["Sepia"])["outer_bg"]
+        self.setStyleSheet(f"background: {outer_bg};")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -81,22 +121,24 @@ class EpubReaderWidget(QWidget):
         # Set up the QWebChannel bridge
         self._bridge = _EpubBridge()
         self._bridge.text_selected.connect(self._on_text_selected)
+        self._bridge.word_double_clicked.connect(self._on_word_double_clicked)
         self._channel = QWebChannel()
         self._channel.registerObject("bridge", self._bridge)
         page.setWebChannel(self._channel)
 
-        self.web_view.setStyleSheet(f"background: {PAGE_BG};")
+        t_cfg = THEMES.get(self.theme, THEMES["Sepia"])
+        self.web_view.setStyleSheet(f"background: {t_cfg['bg']};")
         layout.addWidget(self.web_view, 1)
 
         # ── Bottom navigation bar ────────────────────────────────────
-        nav_bar = QWidget()
-        nav_bar.setStyleSheet("background: transparent;")
-        nav_layout = QHBoxLayout(nav_bar)
+        self.nav_bar = QWidget()
+        self.nav_bar.setStyleSheet("background: transparent;")
+        nav_layout = QHBoxLayout(self.nav_bar)
         nav_layout.setContentsMargins(10, 8, 10, 4)
 
         btn_style = """
             QPushButton {
-                background: rgba(245, 236, 215, 0.12);
+                background: rgba(212, 175, 85, 0.12);
                 color: #C4B38A;
                 border: 1px solid rgba(196, 179, 138, 0.25);
                 border-radius: 6px;
@@ -106,12 +148,9 @@ class EpubReaderWidget(QWidget):
                 letter-spacing: 0.5px;
             }
             QPushButton:hover {
-                background: rgba(245, 236, 215, 0.22);
+                background: rgba(212, 175, 85, 0.22);
                 color: #E8DCC6;
                 border-color: rgba(196, 179, 138, 0.5);
-            }
-            QPushButton:pressed {
-                background: rgba(245, 236, 215, 0.08);
             }
             QPushButton:disabled {
                 color: rgba(196, 179, 138, 0.3);
@@ -146,13 +185,14 @@ class EpubReaderWidget(QWidget):
         self.next_btn.clicked.connect(self._next_chapter)
         nav_layout.addWidget(self.next_btn)
 
-        layout.addWidget(nav_bar)
+        layout.addWidget(self.nav_bar)
 
     # ── Public API ────────────────────────────────────────────────────
 
-    def load_chapters(self, book_id: str, chapters: list[str]) -> None:
+    def load_chapters(self, book_id: str, chapters: list[str], book_title: str = "") -> None:
         """Load EPUB chapters and display the first one."""
         self.book_id = book_id
+        self.book_title = book_title
         self._chapters = chapters
         self._current_chapter = 0
         self._pending_scroll_y = 0.0
@@ -169,6 +209,27 @@ class EpubReaderWidget(QWidget):
             self._current_chapter = index
             self._pending_scroll_y = scroll_y
             self._show_chapter()
+
+    def set_theme(self, theme: str) -> None:
+        """Switch reading theme (Light, Sepia, Dark)."""
+        if theme in THEMES:
+            self.theme = theme
+            settings_manager.set_setting("theme", theme)
+            outer_bg = THEMES[theme]["outer_bg"]
+            self.setStyleSheet(f"background: {outer_bg};")
+            self._show_chapter()
+
+    def set_font_size(self, size: int) -> None:
+        """Adjust EPUB font size in px."""
+        self.font_size = max(12, min(36, size))
+        settings_manager.set_setting("font_size", self.font_size)
+        self._show_chapter()
+
+    def set_line_width(self, width: int) -> None:
+        """Adjust EPUB reading column max width in px."""
+        self.line_width = max(400, min(1400, width))
+        settings_manager.set_setting("line_width", self.line_width)
+        self._show_chapter()
 
     def get_scroll_position(self, callback=None) -> None:
         """Asynchronously get current scroll Y via JS. Calls callback(chapter, scroll_y)."""
@@ -223,6 +284,8 @@ class EpubReaderWidget(QWidget):
         scroll_y = self._pending_scroll_y
         self._pending_scroll_y = 0.0
 
+        t = THEMES.get(self.theme, THEMES["Sepia"])
+
         full_html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -231,88 +294,92 @@ class EpubReaderWidget(QWidget):
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     html {{
         scroll-behavior: auto;
+        background: {t['bg']};
     }}
     body {{
-        background: {PAGE_BG};
-        color: {PAGE_TEXT};
+        background: {t['bg']};
+        color: {t['text']};
         font-family: Georgia, 'Palatino Linotype', 'Book Antiqua', serif;
-        font-size: 15px;
+        font-size: {self.font_size}px;
         line-height: 1.85;
-        padding: 40px 55px 60px 55px;
+        padding: 40px 30px 60px 30px;
+        max-width: {self.line_width}px;
+        margin: 0 auto;
         text-align: justify;
         -webkit-text-size-adjust: 100%;
     }}
     p {{
         text-indent: 28px;
-        margin: 12px 0;
+        margin: 14px 0;
     }}
     h1, h2, h3, h4, h5, h6 {{
         text-align: center;
-        color: #5C4A2A;
-        margin: 30px 0 18px 0;
+        color: {t['heading']};
+        margin: 32px 0 20px 0;
         letter-spacing: 1.5px;
         text-indent: 0;
     }}
     h1 {{
-        font-size: 22px;
-        border-bottom: 1px solid {PAGE_BORDER};
+        font-size: {self.font_size + 8}px;
+        border-bottom: 1px solid {t['border']};
         padding-bottom: 12px;
     }}
-    h2 {{ font-size: 19px; }}
-    h3 {{ font-size: 17px; }}
-
+    h2 {{ font-size: {self.font_size + 5}px; }}
+    h3 {{ font-size: {self.font_size + 3}px; }}
     img {{
         max-width: 100%;
         height: auto;
         display: block;
-        margin: 16px auto;
-    }}
-    a {{
-        color: #7A5C30;
-        text-decoration: none;
-    }}
-    hr {{
-        border: none;
-        border-top: 1px solid {PAGE_BORDER};
-        margin: 30px 0;
+        margin: 20px auto;
+        border-radius: 4px;
     }}
     blockquote {{
-        border-left: 3px solid {PAGE_BORDER};
-        padding-left: 16px;
-        margin: 16px 0;
-        color: #5C4A2A;
+        border-left: 3px solid #D4AF55;
+        padding-left: 20px;
+        margin: 16px 20px;
         font-style: italic;
+        color: {t['heading']};
     }}
     ::selection {{
-        background: rgba(212, 175, 85, 0.35);
-        color: {PAGE_TEXT};
+        background: rgba(212, 175, 85, 0.45);
+        color: inherit;
     }}
     .epub-mark {{
         border-radius: 2px;
-        padding: 1px 0;
+        padding: 1px 2px;
+        color: {t['mark_text']};
     }}
 </style>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script>
     var bridge = null;
-
     new QWebChannel(qt.webChannelTransport, function(channel) {{
         bridge = channel.objects.bridge;
     }});
 
+    // Text selection for marking
     document.addEventListener('mouseup', function(e) {{
         var sel = window.getSelection();
         var text = sel ? sel.toString().trim() : '';
-        if (text && bridge) {{
+        if (text && text.length > 1 && bridge) {{
             var scrollY = window.scrollY || 0;
             bridge.on_text_selected(text, scrollY);
         }}
     }});
 
-    function highlightQuotes(marks) {{
-        // marks = [{{"quote": "...", "color": "#..."}}]
-        if (!marks || marks.length === 0) return;
+    // Double-click word dictionary lookup
+    document.addEventListener('dblclick', function(e) {{
+        var sel = window.getSelection();
+        if (sel) {{
+            var word = sel.toString().trim();
+            if (word && word.length < 50 && bridge && bridge.on_word_double_clicked) {{
+                bridge.on_word_double_clicked(word);
+            }}
+        }}
+    }});
 
+    function highlightQuotes(marks) {{
+        if (!marks || marks.length === 0) return;
         var body = document.body;
         var walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, null, false);
         var textNodes = [];
@@ -325,7 +392,6 @@ class EpubReaderWidget(QWidget):
             var color = mark.color;
             if (!quote) return;
 
-            // Try to find the quote across text nodes
             for (var i = 0; i < textNodes.length; i++) {{
                 var node = textNodes[i];
                 var parent = node.parentNode;
@@ -333,7 +399,6 @@ class EpubReaderWidget(QWidget):
 
                 var idx = node.textContent.indexOf(quote);
                 if (idx !== -1) {{
-                    // Found the entire quote within a single text node
                     var before = node.textContent.substring(0, idx);
                     var match = node.textContent.substring(idx, idx + quote.length);
                     var after = node.textContent.substring(idx + quote.length);
@@ -349,13 +414,12 @@ class EpubReaderWidget(QWidget):
                     if (after) frag.appendChild(document.createTextNode(after));
 
                     parent.replaceChild(frag, node);
-                    break;  // quote found, move to next mark
+                    break;
                 }}
             }}
         }});
     }}
 
-    // Restore scroll position after page load
     window.addEventListener('load', function() {{
         var targetScroll = {int(scroll_y)};
         if (targetScroll > 0) {{
@@ -363,7 +427,6 @@ class EpubReaderWidget(QWidget):
                 window.scrollTo(0, targetScroll);
             }}, 50);
         }}
-        // Apply saved highlights
         var marksData = {json.dumps(highlight_js)};
         if (marksData.length > 0) {{
             setTimeout(function() {{
@@ -380,9 +443,9 @@ class EpubReaderWidget(QWidget):
 
         self.web_view.setHtml(full_html, QUrl("about:blank"))
         self._update_nav()
+        self.chapter_changed.emit(self._current_chapter, len(self._chapters))
 
     def _get_chapter_marks(self) -> list[dict]:
-        """Get marks for the current chapter from the DB."""
         if not self.book_id:
             return []
         all_marks = db.get_marks(self.book_id)
@@ -394,7 +457,6 @@ class EpubReaderWidget(QWidget):
         return chapter_marks
 
     def _build_highlight_js(self, marks: list[dict]) -> list[dict]:
-        """Build a list of {quote, color} dicts for JS highlightQuotes()."""
         result = []
         for m in marks:
             quote = m.get("quote", "")
@@ -405,9 +467,7 @@ class EpubReaderWidget(QWidget):
 
     @staticmethod
     def _parse_loc(loc: str) -> tuple[int, float]:
-        """Parse a location string of format 'chapter_index|scroll_y'."""
         if not loc or "|" not in loc:
-            # Try parsing as a plain integer (legacy format)
             try:
                 return 0, float(loc)
             except (ValueError, TypeError):
@@ -421,7 +481,6 @@ class EpubReaderWidget(QWidget):
     # ── Text selection → Mark dialog ──────────────────────────────────
 
     def _on_text_selected(self, text: str, scroll_y: float) -> None:
-        """Show MarkDialog when text is selected."""
         if not self.book_id or not text:
             return
 
@@ -438,10 +497,13 @@ class EpubReaderWidget(QWidget):
                 note=note,
                 color=color,
             )
-            # Re-render chapter to show the new highlight
             self._pending_scroll_y = scroll_y
             self._show_chapter()
             self.mark_added.emit()
+
+    def _on_word_double_clicked(self, word: str) -> None:
+        dlg = DictionaryPopupDialog(word=word, book_title=self.book_title, parent=self)
+        dlg.exec()
 
     # ── Navigation ────────────────────────────────────────────────────
 
@@ -456,6 +518,16 @@ class EpubReaderWidget(QWidget):
     def _next_chapter(self) -> None:
         if self._current_chapter < len(self._chapters) - 1:
             self.save_reading_position()
+            # Feature 8: Chapter Action Step
+            if self.book_id:
+                action_dlg = ChapterActionDialog(
+                    book_id=self.book_id,
+                    loc=str(self._current_chapter),
+                    book_title=self.book_title,
+                    parent=self,
+                )
+                action_dlg.exec()
+
             self._current_chapter += 1
             self._pending_scroll_y = 0.0
             self._show_chapter()

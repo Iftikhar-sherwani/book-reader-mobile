@@ -1,6 +1,8 @@
 import sys
+from datetime import datetime
 
-from PyQt6.QtCore import QTimer, Qt, QSize
+import PyQt6.QtWebEngineWidgets  # Must import before QCoreApplication
+from PyQt6.QtCore import QEvent, QTimer, Qt, QSize
 from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPalette, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -14,6 +16,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -22,13 +25,17 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core import book_loader, database
+from core import book_loader, database, settings_manager
 import db as db_module
 from core.models import Book
 from core.indexer import IndexWorker
 from ui.library_widget import LibraryWidget
 from ui.reader_widget import ReaderWidget
 from ui.search_widget import SearchPanel
+from ui.review_dialog import ReviewDialog
+from ui.action_dialog import ActionsListDialog
+from ui.dictionary_dialog import VocabularyListDialog
+from ui.stats_dialog import StatsDialog, GoalProgressRing
 
 # ── Color palette ─────────────────────────────────────────────────────
 SIDEBAR_BG = "#1A1714"
@@ -98,6 +105,25 @@ class MainWindow(QMainWindow):
         self.current_book: Book | None = None
         self._index_worker: IndexWorker | None = None
 
+        # Settings & State
+        self.theme = settings_manager.get_setting("theme", "Sepia")
+        self.font_size = settings_manager.get_setting("font_size", 18)
+        self.line_width = settings_manager.get_setting("line_width", 720)
+        self._focus_mode = False
+
+        # Inactivity & Reading session tracking (Feature 11)
+        self._last_active_time = datetime.now()
+        self._session_start_time = None
+        self._session_active_seconds = 0
+        self._session_timer = QTimer(self)
+        self._session_timer.timeout.connect(self._on_session_tick)
+        self._session_timer.start(1000)
+
+        # Install event filter to detect user activity
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
         database.init_db()
         self._build_ui()
         self._build_menu()
@@ -129,11 +155,11 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(reader_page)
 
         # ── Left sidebar ──────────────────────────────────────────────
-        left = QWidget()
-        left.setMaximumWidth(320)
-        left.setMinimumWidth(260)
-        left.setStyleSheet(f"background: {SIDEBAR_BG};")
-        left_layout = QVBoxLayout(left)
+        self.left_sidebar = QWidget()
+        self.left_sidebar.setMaximumWidth(320)
+        self.left_sidebar.setMinimumWidth(260)
+        self.left_sidebar.setStyleSheet(f"background: {SIDEBAR_BG};")
+        left_layout = QVBoxLayout(self.left_sidebar)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
 
@@ -361,9 +387,15 @@ class MainWindow(QMainWindow):
         self.side_tabs.addTab(self.marks_list, "MARKS")
         self.side_tabs.addTab(self.highlights_list, "HIGHLIGHTS")
         self.side_tabs.addTab(self.vocabulary_list, "VOCABULARY")
+
+        self.actions_list = QListWidget()
+        self.actions_list.setStyleSheet(list_style)
+        self.actions_list.itemClicked.connect(self._on_action_item_clicked)
+        self.side_tabs.addTab(self.actions_list, "ACTIONS")
+
         left_layout.addWidget(self.side_tabs, 1)
 
-        splitter.addWidget(left)
+        splitter.addWidget(self.left_sidebar)
 
         # ── Right panel: book reader ──────────────────────────────────
         reader_container = QWidget()
@@ -373,16 +405,16 @@ class MainWindow(QMainWindow):
         reader_layout.setSpacing(0)
 
         # Book title header bar
-        header = QWidget()
-        header.setStyleSheet(f"""
+        self.reader_header = QWidget()
+        self.reader_header.setStyleSheet(f"""
             background: {HEADER_BG};
             border-bottom: 1px solid {HEADER_BORDER};
         """)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(28, 14, 28, 14)
+        header_layout = QHBoxLayout(self.reader_header)
+        header_layout.setContentsMargins(20, 10, 20, 10)
 
         # Back to library button
-        self.back_to_lib_btn = QPushButton("◂  Back to library")
+        self.back_to_lib_btn = QPushButton("◂  Back")
         self.back_to_lib_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back_to_lib_btn.setStyleSheet(f"""
             QPushButton {{
@@ -390,79 +422,112 @@ class MainWindow(QMainWindow):
                 color: {SIDEBAR_ACCENT};
                 border: 1px solid rgba(212, 175, 85, 0.25);
                 border-radius: 6px;
-                padding: 6px 14px;
+                padding: 6px 12px;
                 font-size: 12px;
                 font-weight: 600;
-                letter-spacing: 0.5px;
             }}
             QPushButton:hover {{
                 background: rgba(212, 175, 85, 0.22);
                 border-color: rgba(212, 175, 85, 0.45);
-            }}
-            QPushButton:pressed {{
-                background: rgba(212, 175, 85, 0.08);
             }}
         """)
         self.back_to_lib_btn.clicked.connect(self.show_library)
         header_layout.addWidget(self.back_to_lib_btn)
-        header_layout.addSpacing(16)
+        header_layout.addSpacing(10)
 
         self.book_title_label = QLabel("Open a book to begin reading")
         self.book_title_label.setStyleSheet(f"""
             color: {SIDEBAR_TEXT};
-            font-size: 15px;
+            font-size: 14px;
             font-weight: 600;
             font-family: Georgia, 'Palatino Linotype', serif;
-            letter-spacing: 0.5px;
         """)
-        header_layout.addWidget(self.book_title_label)
-        header_layout.addStretch()
+        header_layout.addWidget(self.book_title_label, 1)
 
-        self.progress_label = QLabel("")
-        self.progress_label.setStyleSheet(f"""
-            color: {SIDEBAR_TEXT_DIM};
-            font-size: 11px;
-            letter-spacing: 1px;
-        """)
-        header_layout.addWidget(self.progress_label)
-
-        # Export marks button
-        self.export_btn = QPushButton("💾  Export Marks")
-        self.export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.export_btn.setToolTip("Export all marks for this book to a Markdown file")
-        self.export_btn.setStyleSheet(f"""
+        btn_header_style = f"""
             QPushButton {{
-                background: rgba(212, 175, 85, 0.10);
-                color: {SIDEBAR_ACCENT};
-                border: 1px solid rgba(212, 175, 85, 0.22);
+                background: rgba(196, 179, 138, 0.08);
+                color: {SIDEBAR_TEXT};
+                border: 1px solid rgba(196, 179, 138, 0.22);
                 border-radius: 6px;
-                padding: 6px 14px;
+                padding: 5px 10px;
                 font-size: 12px;
                 font-weight: 600;
-                letter-spacing: 0.3px;
             }}
             QPushButton:hover {{
-                background: rgba(212, 175, 85, 0.22);
+                background: rgba(212, 175, 85, 0.18);
+                color: {SIDEBAR_ACCENT};
                 border-color: rgba(212, 175, 85, 0.45);
             }}
-            QPushButton:pressed {{
-                background: rgba(212, 175, 85, 0.08);
+        """
+
+        # Font size controls (A- and A+)
+        self.font_down_btn = QPushButton("A-")
+        self.font_down_btn.setStyleSheet(btn_header_style)
+        self.font_down_btn.setToolTip("Decrease Font Size")
+        self.font_down_btn.clicked.connect(self._font_size_down)
+        header_layout.addWidget(self.font_down_btn)
+
+        self.font_up_btn = QPushButton("A+")
+        self.font_up_btn.setStyleSheet(btn_header_style)
+        self.font_up_btn.setToolTip("Increase Font Size")
+        self.font_up_btn.clicked.connect(self._font_size_up)
+        header_layout.addWidget(self.font_up_btn)
+        header_layout.addSpacing(6)
+
+        # Theme selector button
+        self.theme_btn = QPushButton(f"🎨  {self.theme}")
+        self.theme_btn.setStyleSheet(btn_header_style)
+        self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        theme_menu = QMenu(self.theme_btn)
+        for t_name in ["Light", "Sepia", "Dark"]:
+            act = theme_menu.addAction(t_name)
+            act.triggered.connect(lambda ch, t=t_name: self._change_theme(t))
+        self.theme_btn.setMenu(theme_menu)
+        header_layout.addWidget(self.theme_btn)
+        header_layout.addSpacing(6)
+
+        # Focus Mode button (toggled with F key)
+        self.focus_btn = QPushButton("⛶  Focus (F)")
+        self.focus_btn.setCheckable(True)
+        self.focus_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(196, 179, 138, 0.08);
+                color: {SIDEBAR_TEXT};
+                border: 1px solid rgba(196, 179, 138, 0.22);
+                border-radius: 6px;
+                padding: 5px 12px;
+                font-size: 12px;
+                font-weight: 600;
             }}
-            QPushButton:disabled {{
-                color: rgba(212, 175, 85, 0.3);
-                border-color: rgba(212, 175, 85, 0.1);
-                background: transparent;
+            QPushButton:checked {{
+                background: rgba(212, 175, 85, 0.25);
+                color: {SIDEBAR_ACCENT};
+                border-color: {SIDEBAR_ACCENT};
+            }}
+            QPushButton:hover {{
+                background: rgba(212, 175, 85, 0.18);
+                color: {SIDEBAR_ACCENT};
             }}
         """)
+        self.focus_btn.clicked.connect(self._toggle_focus_mode)
+        header_layout.addWidget(self.focus_btn)
+        header_layout.addSpacing(6)
+
+        # Export marks button
+        self.export_btn = QPushButton("💾  Export")
+        self.export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_btn.setToolTip("Export all marks for this book to Markdown")
+        self.export_btn.setStyleSheet(btn_header_style)
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_marks_current_book)
-        header_layout.addSpacing(12)
         header_layout.addWidget(self.export_btn)
+        header_layout.addSpacing(6)
 
         # Search toggle button
-        self.search_btn = QPushButton("\U0001f50d  Search")
+        self.search_btn = QPushButton("🔍  Search")
         self.search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.search_btn.setToolTip("Search inside this book or all books  (Ctrl+F)")
+        self.search_btn.setToolTip("Search inside this book or all books (Ctrl+F)")
         self.search_btn.setCheckable(True)
         self.search_btn.setStyleSheet(f"""
             QPushButton {{
@@ -470,10 +535,9 @@ class MainWindow(QMainWindow):
                 color: {SIDEBAR_TEXT};
                 border: 1px solid rgba(196, 179, 138, 0.22);
                 border-radius: 6px;
-                padding: 6px 14px;
+                padding: 5px 12px;
                 font-size: 12px;
                 font-weight: 600;
-                letter-spacing: 0.3px;
             }}
             QPushButton:checked {{
                 background: rgba(212, 175, 85, 0.18);
@@ -486,10 +550,15 @@ class MainWindow(QMainWindow):
             }}
         """)
         self.search_btn.toggled.connect(self._toggle_search)
-        header_layout.addSpacing(8)
         header_layout.addWidget(self.search_btn)
+        header_layout.addSpacing(6)
 
-        reader_layout.addWidget(header)
+        # Top bar Goal Progress Ring
+        self.reader_ring = GoalProgressRing()
+        self.reader_ring.clicked.connect(self._open_stats)
+        header_layout.addWidget(self.reader_ring)
+
+        reader_layout.addWidget(self.reader_header)
 
         # Search panel (hidden by default, slides in below header)
         self.search_panel = SearchPanel()
@@ -503,6 +572,22 @@ class MainWindow(QMainWindow):
         self.reader.word_saved.connect(self._refresh_vocabulary)
         self.reader.mark_added.connect(self._refresh_marks)
         reader_layout.addWidget(self.reader, 1)
+
+        # Focus mode thin bottom progress line (3px gold line)
+        self.focus_progress_bar = QProgressBar()
+        self.focus_progress_bar.setFixedHeight(3)
+        self.focus_progress_bar.setTextVisible(False)
+        self.focus_progress_bar.setStyleSheet("""
+            QProgressBar {
+                background: rgba(255, 255, 255, 0.08);
+                border: none;
+            }
+            QProgressBar::chunk {
+                background: #D4AF55;
+            }
+        """)
+        self.focus_progress_bar.hide()
+        reader_layout.addWidget(self.focus_progress_bar)
 
         splitter.addWidget(reader_container)
         splitter.setStretchFactor(1, 1)
@@ -535,6 +620,38 @@ class MainWindow(QMainWindow):
         go_bm.setShortcut("Ctrl+Shift+B")
         go_bm.triggered.connect(self._restore_progress)
         bookmark_menu.addAction(go_bm)
+
+        # View menu
+        view_menu = menubar.addMenu("  View  ")
+        focus_act = QAction("Toggle Focus Mode", self)
+        focus_act.setShortcut("F")
+        focus_act.triggered.connect(self._toggle_focus_mode)
+        view_menu.addAction(focus_act)
+
+        theme_menu = view_menu.addMenu("Theme")
+        for t_name in ["Light", "Sepia", "Dark"]:
+            t_act = QAction(t_name, self)
+            t_act.triggered.connect(lambda ch, t=t_name: self._change_theme(t))
+            theme_menu.addAction(t_act)
+
+        # Tools menu
+        tools_menu = menubar.addMenu("  Tools  ")
+        review_act = QAction("🎯  Daily Review", self)
+        review_act.setShortcut("Ctrl+D")
+        review_act.triggered.connect(self._open_daily_review)
+        tools_menu.addAction(review_act)
+
+        actions_act = QAction("📋  Chapter Actions", self)
+        actions_act.triggered.connect(self._open_actions)
+        tools_menu.addAction(actions_act)
+
+        vocab_act = QAction("📖  Vocabulary", self)
+        vocab_act.triggered.connect(self._open_vocab)
+        tools_menu.addAction(vocab_act)
+
+        stats_act = QAction("📊  Reading Stats", self)
+        stats_act.triggered.connect(self._open_stats)
+        tools_menu.addAction(stats_act)
 
         # Search shortcut
         search_action = QAction("Search...", self)
@@ -628,10 +745,55 @@ class MainWindow(QMainWindow):
 
     def _refresh_vocabulary(self) -> None:
         self.vocabulary_list.clear()
+        words = db_module.get_vocab()
+        for w in words:
+            word = w.get("word", "")
+            definition = w.get("definition", "")
+            item_text = f"📖  {word}\n      {definition[:55]}..." if len(definition) > 55 else f"📖  {word}\n      {definition}"
+            item = QListWidgetItem(item_text)
+            item.setData(256, w.get("id"))
+            self.vocabulary_list.addItem(item)
+
+    def _show_vocabulary_context_menu(self, pos) -> None:
+        item = self.vocabulary_list.itemAt(pos)
+        if not item:
+            return
+        vid = item.data(256)
+        if not vid:
+            return
+        menu = QMenu(self.vocabulary_list)
+        del_act = menu.addAction("🗑️  Delete Word")
+        del_act.triggered.connect(lambda: self._delete_vocabulary(vid))
+        menu.exec(self.vocabulary_list.mapToGlobal(pos))
+
+    def _delete_vocabulary(self, vid: int) -> None:
+        db_module.delete_vocab(vid)
+        self._refresh_vocabulary()
+
+    def _refresh_actions(self) -> None:
+        if not hasattr(self, "actions_list"):
+            return
+        self.actions_list.clear()
         book_id = self.current_book.id if self.current_book else None
-        for sw in database.get_saved_words(book_id):
-            item_text = f"📖  {sw.word}\n      {sw.context[:55]}..." if len(sw.context) > 55 else f"📖  {sw.word}\n      {sw.context}"
-            self.vocabulary_list.addItem(item_text)
+        actions = db_module.get_actions(book_id)
+        for a in actions:
+            done = bool(a.get("done"))
+            icon = "☑" if done else "☐"
+            txt = a.get("text", "")
+            item = QListWidgetItem(f"{icon}  {txt}")
+            item.setData(256, a.get("id"))
+            item.setData(257, 1 if done else 0)
+            if done:
+                item.setForeground(QColor("#7A6F5E"))
+            self.actions_list.addItem(item)
+
+    def _on_action_item_clicked(self, item: QListWidgetItem) -> None:
+        aid = item.data(256)
+        done = item.data(257)
+        if aid is not None:
+            new_done = 0 if done else 1
+            db_module.set_action_done(aid, new_done)
+            self._refresh_actions()
 
     def open_book_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -698,6 +860,8 @@ class MainWindow(QMainWindow):
         self._refresh_highlights()
         self._refresh_vocabulary()
         self._refresh_marks()
+        self._refresh_actions()
+        self._update_progress_ring()
         self.export_btn.setEnabled(True)
         self.search_btn.setEnabled(True)
         self.search_panel.set_current_book(book.id)
@@ -1037,7 +1201,141 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._save_progress()
+        self._flush_session()
         super().closeEvent(event)
+
+    def show_library(self) -> None:
+        self._save_progress()
+        self._flush_session()
+        if hasattr(self, "library_screen"):
+            self.library_screen.refresh_library()
+        self.stack.setCurrentIndex(0)
+
+    # ── Focus Mode & Themes & Stats Methods ───────────────────────────
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_F:
+            self._toggle_focus_mode()
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_Escape and self._focus_mode:
+            self._toggle_focus_mode()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (QEvent.Type.MouseMove, QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.Wheel):
+            self._last_active_time = datetime.now()
+        return super().eventFilter(obj, event)
+
+    def _on_session_tick(self) -> None:
+        if not self.current_book or not self.isActiveWindow() or self.stack.currentIndex() != 1:
+            return
+
+        idle_seconds = (datetime.now() - self._last_active_time).total_seconds()
+        if idle_seconds <= 60:
+            if self._session_start_time is None:
+                self._session_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._session_active_seconds += 1
+
+            if self._session_active_seconds >= 60:
+                db_module.add_session(
+                    book_id=self.current_book.id,
+                    start=self._session_start_time,
+                    seconds=self._session_active_seconds,
+                )
+                self._session_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._session_active_seconds = 0
+                self._update_progress_ring()
+
+        if self._focus_mode:
+            self._update_focus_progress()
+
+    def _flush_session(self) -> None:
+        if self.current_book and self._session_active_seconds > 0 and self._session_start_time:
+            db_module.add_session(
+                book_id=self.current_book.id,
+                start=self._session_start_time,
+                seconds=self._session_active_seconds,
+            )
+            self._session_active_seconds = 0
+            self._session_start_time = None
+
+    def _toggle_focus_mode(self) -> None:
+        if self.stack.currentIndex() != 1:
+            return
+        self._focus_mode = not self._focus_mode
+        if self._focus_mode:
+            self.menuBar().hide()
+            self.left_sidebar.hide()
+            self.reader_header.hide()
+            self.focus_btn.setChecked(True)
+            self._update_focus_progress()
+            self.focus_progress_bar.show()
+        else:
+            self.menuBar().show()
+            self.left_sidebar.show()
+            self.reader_header.show()
+            self.focus_btn.setChecked(False)
+            self.focus_progress_bar.hide()
+
+    def _update_focus_progress(self) -> None:
+        if not self.current_book:
+            return
+        total = self.reader._total_pages
+        cur = self.reader.get_current_page_index()
+        if total > 0:
+            pct = int(((cur + 1) / total) * 100)
+            self.focus_progress_bar.setValue(pct)
+
+    def _change_theme(self, theme: str) -> None:
+        self.theme = theme
+        settings_manager.set_setting("theme", theme)
+        self.theme_btn.setText(f"🎨  {theme}")
+        self.reader.set_theme(theme)
+
+    def _font_size_up(self) -> None:
+        self.font_size = min(36, self.font_size + 2)
+        settings_manager.set_setting("font_size", self.font_size)
+        self.reader.set_font_size(self.font_size)
+
+    def _font_size_down(self) -> None:
+        self.font_size = max(12, self.font_size - 2)
+        settings_manager.set_setting("font_size", self.font_size)
+        self.reader.set_font_size(self.font_size)
+
+    def _update_progress_ring(self) -> None:
+        today_key = datetime.now().strftime("%Y-%m-%d")
+        today_secs = sum(s.get("seconds", 0) for s in db_module.get_sessions() if s.get("start", "")[:10] == today_key)
+        today_secs += self._session_active_seconds
+        goal = settings_manager.get_setting("daily_goal_minutes", 15)
+        if hasattr(self, "reader_ring"):
+            self.reader_ring.set_progress(today_secs / 60.0, goal)
+        if hasattr(self, "library_screen"):
+            self.library_screen.progress_ring.set_progress(today_secs / 60.0, goal)
+
+    def _open_daily_review(self) -> None:
+        dlg = ReviewDialog(self)
+        dlg.review_completed.connect(self._refresh_library)
+        dlg.exec()
+        self._refresh_library()
+
+    def _open_actions(self) -> None:
+        dlg = ActionsListDialog(self)
+        dlg.exec()
+        self._refresh_actions()
+
+    def _open_vocab(self) -> None:
+        dlg = VocabularyListDialog(self)
+        dlg.exec()
+        self._refresh_vocabulary()
+
+    def _open_stats(self) -> None:
+        dlg = StatsDialog(self)
+        dlg.goal_updated.connect(lambda _: self._update_progress_ring())
+        dlg.exec()
+        self._update_progress_ring()
 
 
 def run() -> None:

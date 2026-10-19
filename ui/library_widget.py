@@ -29,6 +29,10 @@ from PyQt6.QtWidgets import (
 
 from core import cover_service, progress_service
 import db
+from ui.review_dialog import ReviewDialog
+from ui.action_dialog import ActionsListDialog
+from ui.dictionary_dialog import VocabularyListDialog
+from ui.stats_dialog import StatsDialog, GoalProgressRing
 
 # ── Color Palette (consistent with main_window) ──────────────────────
 SIDEBAR_BG = "#1A1714"
@@ -292,44 +296,20 @@ class LibraryWidget(QWidget):
 
         header_layout.addStretch()
 
-        # Add Book button
-        add_btn = QPushButton("＋  Add book")
-        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: rgba(212, 175, 85, 0.15);
-                color: {SIDEBAR_ACCENT};
-                border: 1px solid rgba(212, 175, 85, 0.35);
-                border-radius: 8px;
-                padding: 10px 22px;
-                font-size: 13px;
-                font-weight: 600;
-                letter-spacing: 0.5px;
-            }}
-            QPushButton:hover {{
-                background: rgba(212, 175, 85, 0.28);
-                border-color: rgba(212, 175, 85, 0.6);
-            }}
-            QPushButton:pressed {{
-                background: rgba(212, 175, 85, 0.10);
-            }}
-        """)
-        add_btn.clicked.connect(self._on_add_book_clicked)
-        header_layout.addWidget(add_btn)
-        header_layout.addSpacing(10)
+        # Goal progress ring
+        self.progress_ring = GoalProgressRing()
+        self.progress_ring.clicked.connect(self._open_stats)
+        header_layout.addWidget(self.progress_ring)
+        header_layout.addSpacing(6)
 
-        # Export all books button
-        export_all_btn = QPushButton("💾  Export all marks")
-        export_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        export_all_btn.setToolTip("Export marks for every book into a folder you choose")
-        export_all_btn.setStyleSheet(f"""
+        btn_base_style = f"""
             QPushButton {{
                 background: rgba(212, 175, 85, 0.08);
                 color: {SIDEBAR_TEXT};
                 border: 1px solid rgba(196, 179, 138, 0.25);
                 border-radius: 8px;
-                padding: 10px 18px;
-                font-size: 13px;
+                padding: 9px 15px;
+                font-size: 12px;
                 font-weight: 500;
                 letter-spacing: 0.3px;
             }}
@@ -338,10 +318,67 @@ class LibraryWidget(QWidget):
                 color: {SIDEBAR_ACCENT};
                 border-color: rgba(212, 175, 85, 0.45);
             }}
-            QPushButton:pressed {{
-                background: rgba(212, 175, 85, 0.06);
+        """
+
+        # Daily review button
+        self.review_btn = QPushButton("🎯  Daily review (0)")
+        self.review_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.review_btn.clicked.connect(self._open_review)
+        header_layout.addWidget(self.review_btn)
+        header_layout.addSpacing(6)
+
+        # Actions button
+        self.actions_btn = QPushButton("📋  Actions")
+        self.actions_btn.setStyleSheet(btn_base_style)
+        self.actions_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.actions_btn.clicked.connect(self._open_actions)
+        header_layout.addWidget(self.actions_btn)
+        header_layout.addSpacing(6)
+
+        # Vocabulary button
+        self.vocab_btn = QPushButton("📖  Vocabulary")
+        self.vocab_btn.setStyleSheet(btn_base_style)
+        self.vocab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.vocab_btn.clicked.connect(self._open_vocab)
+        header_layout.addWidget(self.vocab_btn)
+        header_layout.addSpacing(6)
+
+        # Stats button
+        self.stats_btn = QPushButton("📊  Stats")
+        self.stats_btn.setStyleSheet(btn_base_style)
+        self.stats_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stats_btn.clicked.connect(self._open_stats)
+        header_layout.addWidget(self.stats_btn)
+        header_layout.addSpacing(10)
+
+        # Add Book button
+        add_btn = QPushButton("＋  Add book")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(212, 175, 85, 0.18);
+                color: {SIDEBAR_ACCENT};
+                border: 1px solid rgba(212, 175, 85, 0.45);
+                border-radius: 8px;
+                padding: 9px 18px;
+                font-size: 13px;
+                font-weight: 600;
+                letter-spacing: 0.5px;
+            }}
+            QPushButton:hover {{
+                background: rgba(212, 175, 85, 0.30);
+                border-color: rgba(212, 175, 85, 0.7);
             }}
         """)
+        add_btn.clicked.connect(self._on_add_book_clicked)
+        header_layout.addWidget(add_btn)
+        header_layout.addSpacing(6)
+
+        # Export all books button
+        export_all_btn = QPushButton("💾  Export all marks")
+        export_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        export_all_btn.setToolTip("Export marks for every book into a folder you choose")
+        export_all_btn.setStyleSheet(btn_base_style)
         export_all_btn.clicked.connect(self._on_export_all_clicked)
         header_layout.addWidget(export_all_btn)
 
@@ -407,6 +444,49 @@ class LibraryWidget(QWidget):
             return (lr, ad)
 
         all_books.sort(key=sort_key, reverse=True)
+
+        # Update Daily Review badge
+        due_count = db.count_due_reviews()
+        if due_count > 0:
+            self.review_btn.setText(f"🎯  Daily review ({due_count})")
+            self.review_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgba(212, 175, 85, 0.24);
+                    color: {SIDEBAR_ACCENT};
+                    border: 1px solid {SIDEBAR_ACCENT};
+                    border-radius: 8px;
+                    padding: 9px 15px;
+                    font-size: 12px;
+                    font-weight: 700;
+                }}
+                QPushButton:hover {{
+                    background: rgba(212, 175, 85, 0.38);
+                }}
+            """)
+        else:
+            self.review_btn.setText("🎯  Daily review (0)")
+            self.review_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgba(212, 175, 85, 0.08);
+                    color: {SIDEBAR_TEXT_DIM};
+                    border: 1px solid rgba(196, 179, 138, 0.2);
+                    border-radius: 8px;
+                    padding: 9px 15px;
+                    font-size: 12px;
+                    font-weight: 500;
+                }}
+                QPushButton:hover {{
+                    background: rgba(212, 175, 85, 0.15);
+                    color: {SIDEBAR_TEXT};
+                }}
+            """)
+
+        # Update Progress Ring
+        today_str = datetime.now().strftime("%Y-%m-%d") if "datetime" in globals() else ""
+        from datetime import datetime as dt
+        today_key = dt.now().strftime("%Y-%m-%d")
+        today_secs = sum(s.get("seconds", 0) for s in db.get_sessions() if s.get("start", "")[:10] == today_key)
+        self.progress_ring.set_progress(today_secs / 60.0)
 
         count = len(all_books)
         self.subtitle_label.setText(f"{count} {'book' if count == 1 else 'books'} in library")
@@ -498,6 +578,27 @@ class LibraryWidget(QWidget):
             f"Exported {total_marks} mark{'s' if total_marks != 1 else ''} across "
             f"{total_books} book{'s' if total_books != 1 else ''} to:\n{folder}\n\n{detail}",
         )
+
+    def _open_review(self) -> None:
+        dlg = ReviewDialog(self)
+        dlg.review_completed.connect(self.refresh_library)
+        dlg.exec()
+        self.refresh_library()
+
+    def _open_actions(self) -> None:
+        dlg = ActionsListDialog(self)
+        dlg.exec()
+
+    def _open_vocab(self) -> None:
+        dlg = VocabularyListDialog(self)
+        dlg.exec()
+
+    def _open_stats(self) -> None:
+        dlg = StatsDialog(self)
+        dlg.goal_updated.connect(lambda _: self.refresh_library())
+        dlg.exec()
+        self.refresh_library()
+
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

@@ -595,6 +595,9 @@ def get_due_review_count(db_path: Path | str | None = None) -> int:
         return row["cnt"] if row else 0
 
 
+count_due_reviews = get_due_review_count
+
+
 def get_due_reviews(limit: int = 10, db_path: Path | str | None = None) -> list[dict]:
     """Return up to *limit* review cards that are due today or earlier.
 
