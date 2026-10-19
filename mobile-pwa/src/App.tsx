@@ -10,6 +10,8 @@ import {
   saveSettings,
   saveProgress,
   getAllMarks,
+  getDueReviewCount,
+  getTodayReadingSeconds,
   DEFAULT_SETTINGS,
 } from './services/db';
 import { exportAllBooksMarks } from './services/marksExporter';
@@ -23,6 +25,8 @@ import { ReaderView } from './components/ReaderView';
 import { SettingsModal } from './components/SettingsModal';
 import { DuplicateBookModal } from './components/DuplicateBookModal';
 import { SearchModal } from './components/SearchModal';
+import { ReviewScreen } from './components/ReviewScreen';
+import { StatsScreen } from './components/StatsScreen';
 
 export const App: React.FC = () => {
   const [books, setBooks] = useState<Book[]>([]);
@@ -35,7 +39,13 @@ export const App: React.FC = () => {
   const [isBookmarksOpen, setIsBookmarksOpen] = useState(false);
   const [isMarksOpen, setIsMarksOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
+  const [isStatsOpen, setIsStatsOpen] = useState(false);
+  const [isFocusMode, setIsFocusMode] = useState(false);
   const [duplicateBook, setDuplicateBook] = useState<Book | null>(null);
+
+  // Reading time tracking state
+  const [todayReadingSeconds, setTodayReadingSeconds] = useState(0);
 
   // Settings
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
@@ -51,14 +61,16 @@ export const App: React.FC = () => {
   const [isStandalone, setIsStandalone] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [waitingWorker, setWaitingWorker] = useState<ServiceWorker | null>(null);
+  const [dueReviewCount, setDueReviewCount] = useState(0);
 
   // 1. Initial Load: Books, Progress, Settings, Standalone check
   const refreshLibrary = useCallback(async () => {
     try {
-      const [loadedBooks, loadedProgress, loadedSettings] = await Promise.all([
+      const [loadedBooks, loadedProgress, loadedSettings, todaySeconds] = await Promise.all([
         getAllBooks(),
         getAllProgress(),
         getSettings(),
+        getTodayReadingSeconds().catch(() => 0),
       ]);
 
       setBooks(loadedBooks);
@@ -66,7 +78,14 @@ export const App: React.FC = () => {
       loadedProgress.forEach((p) => pMap.set(p.bookId, p));
       setProgressMap(pMap);
       setSettings(loadedSettings);
+      setTodayReadingSeconds(todaySeconds);
       document.documentElement.setAttribute('data-theme', loadedSettings.theme);
+
+      // Load due review count
+      try {
+        const count = await getDueReviewCount();
+        setDueReviewCount(count);
+      } catch (_) { /* reviews store may not exist yet */ }
     } catch (err) {
       console.error('Failed to load library:', err);
     }
@@ -298,32 +317,40 @@ export const App: React.FC = () => {
 
   return (
     <div className="app-container">
-      {/* Universal Header */}
-      <Header
-        isReading={Boolean(currentBook)}
-        bookTitle={currentBook?.title}
-        isOfflineReady={isOfflineReady}
-        isOnline={isOnline}
-        updateAvailable={updateAvailable}
-        settings={settings}
-        onBackToLibrary={() => {
-          setCurrentBook(null);
-          refreshLibrary();
-        }}
-        onOpenBookmarks={() => setIsBookmarksOpen(true)}
-        onOpenMarks={() => setIsMarksOpen(true)}
-        onOpenSearch={() => setIsSearchOpen(true)}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        onApplyUpdate={handleApplyUpdate}
-        onToggleTheme={handleToggleTheme}
-      />
+      {/* Universal Header - Hidden in Focus Mode */}
+      {!isFocusMode && (
+        <Header
+          isReading={Boolean(currentBook)}
+          bookTitle={currentBook?.title}
+          isOfflineReady={isOfflineReady}
+          isOnline={isOnline}
+          updateAvailable={updateAvailable}
+          settings={settings}
+          todayReadingSeconds={todayReadingSeconds}
+          onOpenStats={() => setIsStatsOpen(true)}
+          onBackToLibrary={() => {
+            setIsFocusMode(false);
+            setCurrentBook(null);
+            refreshLibrary();
+          }}
+          onOpenBookmarks={() => setIsBookmarksOpen(true)}
+          onOpenMarks={() => setIsMarksOpen(true)}
+          onOpenSearch={() => setIsSearchOpen(true)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          onApplyUpdate={handleApplyUpdate}
+          onToggleTheme={handleToggleTheme}
+        />
+      )}
 
       {/* Main View: Library or Active Reader */}
       {currentBook ? (
         <ReaderView
           book={currentBook}
           settings={settings}
+          onUpdateSettings={handleUpdateSettings}
+          onFocusModeChange={setIsFocusMode}
           onBackToLibrary={() => {
+            setIsFocusMode(false);
             setCurrentBook(null);
             refreshLibrary();
           }}
@@ -332,6 +359,7 @@ export const App: React.FC = () => {
           isMarksOpen={isMarksOpen}
           onCloseMarks={() => setIsMarksOpen(false)}
           onOpenMarks={() => setIsMarksOpen(true)}
+          onSessionRecorded={(sec) => setTodayReadingSeconds((prev) => prev + sec)}
         />
       ) : (
         <LibraryView
@@ -343,6 +371,10 @@ export const App: React.FC = () => {
           onImportFile={handleImportFile}
           onDeleteBook={handleDeleteBook}
           onExportAllMarks={handleExportAllMarks}
+          onOpenReview={() => setIsReviewOpen(true)}
+          onOpenStats={() => setIsStatsOpen(true)}
+          todayReadingSeconds={todayReadingSeconds}
+          dueReviewCount={dueReviewCount}
           isImporting={isImporting}
           importError={importError}
           deferredPrompt={deferredPrompt}
@@ -379,6 +411,28 @@ export const App: React.FC = () => {
             setCurrentBook(bookToOpen);
           }}
           onCancel={() => setDuplicateBook(null)}
+        />
+      )}
+
+      {/* Review Screen */}
+      {isReviewOpen && (
+        <ReviewScreen
+          onClose={() => {
+            setIsReviewOpen(false);
+            refreshLibrary();
+          }}
+        />
+      )}
+
+      {/* Reading Statistics & Daily Goal Screen */}
+      {isStatsOpen && (
+        <StatsScreen
+          settings={settings}
+          onUpdateSettings={handleUpdateSettings}
+          onClose={() => {
+            setIsStatsOpen(false);
+            refreshLibrary();
+          }}
         />
       )}
     </div>

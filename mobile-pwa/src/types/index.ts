@@ -40,6 +40,8 @@ export interface ReaderSettings {
   fontFamily: 'serif' | 'sans-serif';
   pdfFitMode: 'width' | 'page';
   tapToTurn: boolean;
+  dailyGoalMinutes: number; // Daily reading goal in minutes (default 15)
+  lineWidth: number; // Max line width in px for EPUB/TXT (default 680)
 }
 
 export interface StorageStats {
@@ -88,5 +90,36 @@ export interface BackupData {
   progress: ReadingProgress[];
   bookmarks: Bookmark[];
   marks?: Mark[];
+}
+
+export interface Review {
+  markId: string;    // references Mark.id
+  due: string;       // ISO date string "YYYY-MM-DD"
+  intervalDays: number;
+}
+
+export interface ChapterAction {
+  id: string;
+  book_id: string;
+  loc: string;
+  text: string;
+  created: string;
+  done: number; // 0 or 1
+  bookTitle?: string;
+}
+
+export interface VocabWord {
+  id: string;
+  word: string;
+  definition: string;
+  book: string;
+  date: string;
+}
+
+export interface ReadingSession {
+  id: string;
+  book_id: string;
+  start: string;
+  seconds: number;
 }
 

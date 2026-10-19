@@ -216,6 +216,89 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <option value="night">Soft Dark Filter</option>
               </select>
             </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <span style={{ fontSize: 14, display: 'block' }}>Daily Reading Goal</span>
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Minutes per day</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="number"
+                  min="1"
+                  max="240"
+                  value={settings.dailyGoalMinutes || 15}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    if (!isNaN(val) && val > 0) {
+                      onUpdateSettings({ dailyGoalMinutes: val });
+                    }
+                  }}
+                  style={{
+                    width: 65,
+                    height: 36,
+                    borderRadius: 8,
+                    padding: '0 8px',
+                    textAlign: 'center',
+                    backgroundColor: 'var(--bg-elevated)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border-subtle)',
+                    fontSize: 14,
+                    fontWeight: 600,
+                  }}
+                />
+                <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>min</span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <span style={{ fontSize: 14, display: 'block' }}>EPUB / TXT Font Size</span>
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{settings.fontSize || 18}px</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button
+                  className="secondary-btn"
+                  onClick={() => onUpdateSettings({ fontSize: Math.max(12, (settings.fontSize || 18) - 1) })}
+                  style={{ width: 34, height: 34, padding: 0, fontWeight: 700 }}
+                  title="Decrease font size (A-)"
+                >
+                  A-
+                </button>
+                <span style={{ minWidth: 32, textAlign: 'center', fontSize: 13, fontWeight: 600 }}>
+                  {settings.fontSize || 18}
+                </span>
+                <button
+                  className="secondary-btn"
+                  onClick={() => onUpdateSettings({ fontSize: Math.min(36, (settings.fontSize || 18) + 1) })}
+                  style={{ width: 34, height: 34, padding: 0, fontWeight: 700 }}
+                  title="Increase font size (A+)"
+                >
+                  A+
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <span style={{ fontSize: 14, display: 'block' }}>Reading Line Width</span>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Content margin width</span>
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent-gold)' }}>
+                  {settings.lineWidth || 680}px
+                </span>
+              </div>
+              <input
+                type="range"
+                min="460"
+                max="1100"
+                step="20"
+                value={settings.lineWidth || 680}
+                onChange={(e) => onUpdateSettings({ lineWidth: Number(e.target.value) })}
+                style={{ width: '100%', accentColor: 'var(--accent-gold)' }}
+              />
+            </div>
           </div>
         </div>
 

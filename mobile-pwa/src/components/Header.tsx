@@ -20,6 +20,8 @@ interface HeaderProps {
   isOnline: boolean;
   updateAvailable: boolean;
   settings: ReaderSettings;
+  todayReadingSeconds?: number;
+  onOpenStats?: () => void;
   onBackToLibrary?: () => void;
   onOpenBookmarks?: () => void;
   onOpenMarks?: () => void;
@@ -36,6 +38,8 @@ export const Header: React.FC<HeaderProps> = ({
   isOnline,
   updateAvailable,
   settings,
+  todayReadingSeconds = 0,
+  onOpenStats,
   onBackToLibrary,
   onOpenBookmarks,
   onOpenMarks,
@@ -44,6 +48,11 @@ export const Header: React.FC<HeaderProps> = ({
   onApplyUpdate,
   onToggleTheme,
 }) => {
+  const goalMinutes = settings.dailyGoalMinutes || 15;
+  const todayMinutes = todayReadingSeconds / 60;
+  const progressPercent = Math.min(100, Math.round((todayMinutes / goalMinutes) * 100));
+  const todayMinutesDisplay = Math.round(todayMinutes * 10) / 10;
+
   return (
     <header
       style={{
@@ -127,6 +136,61 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right section: Badges & Controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+        {/* Daily Goal Progress Ring */}
+        {onOpenStats && (
+          <button
+            className="icon-btn"
+            onClick={onOpenStats}
+            aria-label="Reading Statistics and Daily Goal"
+            title={`Today: ${todayMinutesDisplay}m / ${goalMinutes}m goal (${progressPercent}%). Click to view stats.`}
+            style={{
+              position: 'relative',
+              width: 34,
+              height: 34,
+              padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <svg width="30" height="30" viewBox="0 0 32 32">
+              <circle
+                cx="16"
+                cy="16"
+                r="12"
+                fill="none"
+                stroke="currentColor"
+                strokeOpacity="0.15"
+                strokeWidth="2.5"
+              />
+              <circle
+                cx="16"
+                cy="16"
+                r="12"
+                fill="none"
+                stroke={progressPercent >= 100 ? '#10b981' : 'var(--accent-gold)'}
+                strokeWidth="2.5"
+                strokeDasharray="75.398"
+                strokeDashoffset={75.398 * (1 - progressPercent / 100)}
+                strokeLinecap="round"
+                transform="rotate(-90 16 16)"
+                style={{ transition: 'stroke-dashoffset 0.4s ease' }}
+              />
+            </svg>
+            <span
+              style={{
+                position: 'absolute',
+                fontSize: 8.5,
+                fontWeight: 700,
+                color: progressPercent >= 100 ? '#10b981' : 'var(--text-secondary)',
+                letterSpacing: '-0.5px',
+              }}
+            >
+              {progressPercent >= 100 ? '✓' : `${progressPercent}%`}
+            </span>
+          </button>
+        )}
+
         {/* Offline Ready Badge (in library) */}
         {!isReading && (
           <div

@@ -968,11 +968,30 @@ class MainWindow(QMainWindow):
             }}
         """)
 
+        card_action = menu.addAction("🎨  Make quote card")
+        card_action.triggered.connect(lambda: self._make_quote_card(mark_id))
         edit_action = menu.addAction("✏️  Edit Note")
         edit_action.triggered.connect(lambda: self._edit_mark(mark_id))
         delete_action = menu.addAction("🗑️  Delete Mark")
         delete_action.triggered.connect(lambda: self._delete_mark(mark_id))
         menu.exec(self.marks_list.mapToGlobal(pos))
+
+    def _make_quote_card(self, mark_id: int) -> None:
+        """Open the quote card preview dialog for this mark."""
+        from ui.quote_card_dialog import QuoteCardDialog
+        m = db_module.get_mark(mark_id)
+        if not m:
+            return
+        quote = m.get("quote", "")
+        if not quote:
+            QMessageBox.information(self, "No Quote", "This mark does not have quote text.")
+            return
+
+        title = self.current_book.title if self.current_book else "Unknown Book"
+        author = getattr(self.current_book, "author", "") if self.current_book else ""
+
+        dlg = QuoteCardDialog(quote=quote, title=title, author=author, parent=self)
+        dlg.exec()
 
     def _edit_mark(self, mark_id: int) -> None:
         from ui.mark_dialog import MarkDialog

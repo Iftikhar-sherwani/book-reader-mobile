@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
-import type { Book, ReadingProgress } from '../types';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import type { Book, ReadingProgress, ChapterAction, VocabWord } from '../types';
+import { getActions, setActionDone, deleteAction, getAllVocab, deleteVocabWord } from '../services/db';
 import {
   Plus,
   Search,
@@ -13,8 +14,26 @@ import {
   HelpCircle,
   X,
   Download,
+  Brain,
+  CheckSquare,
+  Check,
+  Sparkles,
+  TrendingUp,
 } from 'lucide-react';
 import { InstallPrompt } from './InstallPrompt';
+
+function formatActionDate(isoString: string): string {
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return isoString;
+    return d.toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+    });
+  } catch {
+    return isoString;
+  }
+}
 
 interface LibraryViewProps {
   books: Book[];
@@ -25,6 +44,10 @@ interface LibraryViewProps {
   onImportFile: (file: File) => void;
   onDeleteBook: (book: Book) => void;
   onExportAllMarks?: () => void;
+  onOpenReview?: () => void;
+  onOpenStats?: () => void;
+  todayReadingSeconds?: number;
+  dueReviewCount: number;
   isImporting: boolean;
   importError?: string | null;
   deferredPrompt: any;
@@ -40,6 +63,10 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   onImportFile,
   onDeleteBook,
   onExportAllMarks,
+  onOpenReview,
+  onOpenStats,
+  todayReadingSeconds = 0,
+  dueReviewCount,
   isImporting,
   importError,
   deferredPrompt,
@@ -49,6 +76,93 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const allFilesInputRef = useRef<HTMLInputElement>(null);
   const [bookToDelete, setBookToDelete] = useState<Book | null>(null);
   const [showMemoryHelp, setShowMemoryHelp] = useState(false);
+
+  // Tabs State (Books / Actions / Vocabulary)
+  const [activeTab, setActiveTab] = useState<'books' | 'actions' | 'vocab'>('books');
+  const [actions, setActions] = useState<ChapterAction[]>([]);
+  const [actionFilter, setActionFilter] = useState<'all' | 'pending' | 'done'>('all');
+
+  // Vocabulary Tab State
+  const [vocabWords, setVocabWords] = useState<VocabWord[]>([]);
+
+  const loadActions = useCallback(async () => {
+    try {
+      const items = await getActions();
+      setActions(items);
+    } catch (err) {
+      console.warn('Failed to load actions:', err);
+    }
+  }, []);
+
+  const loadVocab = useCallback(async () => {
+    try {
+      const items = await getAllVocab();
+      setVocabWords(items);
+    } catch (err) {
+      console.warn('Failed to load vocabulary:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadActions();
+    loadVocab();
+  }, [loadActions, loadVocab, activeTab]);
+
+  const handleToggleAction = async (action: ChapterAction) => {
+    const newDone = action.done === 1 ? 0 : 1;
+    try {
+      await setActionDone(action.id, newDone);
+      setActions((prev) =>
+        prev.map((a) => (a.id === action.id ? { ...a, done: newDone } : a))
+      );
+    } catch (err) {
+      console.warn('Failed to update action:', err);
+    }
+  };
+
+  const handleDeleteAction = async (id: string) => {
+    try {
+      await deleteAction(id);
+      setActions((prev) => prev.filter((a) => a.id !== id));
+    } catch (err) {
+      console.warn('Failed to delete action:', err);
+    }
+  };
+
+  const handleDeleteVocab = async (id: string) => {
+    try {
+      await deleteVocabWord(id);
+      setVocabWords((prev) => prev.filter((v) => v.id !== id));
+    } catch (err) {
+      console.warn('Failed to delete vocabulary word:', err);
+    }
+  };
+
+  const pendingActionsCount = actions.filter((a) => a.done === 0).length;
+
+  const filteredActions = actions.filter((a) => {
+    if (actionFilter === 'pending' && a.done === 1) return false;
+    if (actionFilter === 'done' && a.done === 0) return false;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      const textMatch = a.text.toLowerCase().includes(q);
+      const bookMatch = a.bookTitle?.toLowerCase().includes(q);
+      const locMatch = a.loc.toLowerCase().includes(q);
+      return textMatch || bookMatch || locMatch;
+    }
+    return true;
+  });
+
+  const filteredVocab = vocabWords.filter((v) => {
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      const wordMatch = v.word.toLowerCase().includes(q);
+      const defMatch = v.definition.toLowerCase().includes(q);
+      const bookMatch = v.book.toLowerCase().includes(q);
+      return wordMatch || defMatch || bookMatch;
+    }
+    return true;
+  });
 
   // Filter books by search query
   const filteredBooks = books.filter(
@@ -152,7 +266,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             />
             <input
               type="text"
-              placeholder="Search library..."
+              placeholder={activeTab === 'books' ? "Search library..." : activeTab === 'actions' ? "Search action steps..." : "Search vocabulary..."}
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
               style={{
@@ -255,8 +369,474 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         )}
       </div>
 
-      {/* Prominent "Continue Reading" Action */}
-      {recentBook && !searchQuery && (
+      {/* Navigation Tabs: Books / Actions / Vocabulary */}
+      <div
+        style={{
+          display: 'flex',
+          backgroundColor: 'var(--bg-surface)',
+          borderRadius: 14,
+          padding: 4,
+          border: '1px solid var(--border-subtle)',
+          gap: 4,
+        }}
+      >
+        <button
+          onClick={() => setActiveTab('books')}
+          style={{
+            flex: 1,
+            padding: '10px 10px',
+            borderRadius: 10,
+            border: 'none',
+            backgroundColor: activeTab === 'books' ? 'var(--bg-elevated)' : 'transparent',
+            color: activeTab === 'books' ? 'var(--accent-gold)' : 'var(--text-secondary)',
+            fontWeight: 600,
+            fontSize: 13,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            boxShadow: activeTab === 'books' ? '0 2px 8px rgba(0,0,0,0.3)' : 'none',
+            transition: 'all 0.15s ease',
+          }}
+        >
+          <BookOpen size={15} />
+          <span>Books ({books.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('actions')}
+          style={{
+            flex: 1,
+            padding: '10px 10px',
+            borderRadius: 10,
+            border: 'none',
+            backgroundColor: activeTab === 'actions' ? 'var(--bg-elevated)' : 'transparent',
+            color: activeTab === 'actions' ? 'var(--accent-gold)' : 'var(--text-secondary)',
+            fontWeight: 600,
+            fontSize: 13,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            boxShadow: activeTab === 'actions' ? '0 2px 8px rgba(0,0,0,0.3)' : 'none',
+            transition: 'all 0.15s ease',
+          }}
+        >
+          <CheckSquare size={15} />
+          <span>Actions</span>
+          {pendingActionsCount > 0 && (
+            <span
+              style={{
+                padding: '1px 6px',
+                borderRadius: 10,
+                fontSize: 11,
+                fontWeight: 700,
+                backgroundColor: 'rgba(212, 175, 85, 0.2)',
+                color: 'var(--accent-gold)',
+                border: '1px solid rgba(212, 175, 85, 0.4)',
+              }}
+            >
+              {pendingActionsCount}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab('vocab')}
+          style={{
+            flex: 1,
+            padding: '10px 10px',
+            borderRadius: 10,
+            border: 'none',
+            backgroundColor: activeTab === 'vocab' ? 'var(--bg-elevated)' : 'transparent',
+            color: activeTab === 'vocab' ? 'var(--accent-gold)' : 'var(--text-secondary)',
+            fontWeight: 600,
+            fontSize: 13,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            boxShadow: activeTab === 'vocab' ? '0 2px 8px rgba(0,0,0,0.3)' : 'none',
+            transition: 'all 0.15s ease',
+          }}
+        >
+          <Sparkles size={15} />
+          <span>Vocab</span>
+          {vocabWords.length > 0 && (
+            <span
+              style={{
+                padding: '1px 6px',
+                borderRadius: 10,
+                fontSize: 11,
+                fontWeight: 700,
+                backgroundColor: 'rgba(212, 175, 85, 0.2)',
+                color: 'var(--accent-gold)',
+                border: '1px solid rgba(212, 175, 85, 0.4)',
+              }}
+            >
+              {vocabWords.length}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {activeTab === 'vocab' ? (
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h2 style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-secondary)', margin: 0 }}>
+              Saved Vocabulary ({filteredVocab.length})
+            </h2>
+          </div>
+
+          {filteredVocab.length === 0 ? (
+            /* Empty State */
+            <div
+              style={{
+                padding: '48px 24px',
+                textAlign: 'center',
+                backgroundColor: 'var(--bg-surface)',
+                borderRadius: 16,
+                border: '1px dashed var(--border-subtle)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 12,
+              }}
+            >
+              <div
+                style={{
+                  width: 52,
+                  height: 52,
+                  borderRadius: 16,
+                  backgroundColor: 'rgba(212, 175, 85, 0.1)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: 'var(--accent-gold)',
+                }}
+              >
+                <Sparkles size={26} />
+              </div>
+              <h3 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
+                {searchQuery.trim() ? 'No matching vocabulary' : 'No saved words yet'}
+              </h3>
+              <p style={{ fontSize: 13, color: 'var(--text-muted)', maxWidth: 320, lineHeight: 1.5, margin: 0 }}>
+                {searchQuery.trim()
+                  ? `No vocabulary matching "${searchQuery}"`
+                  : 'Double-click any word while reading to view its dictionary definition and tap "Save word" to build your personal lexicon.'}
+              </p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {filteredVocab.map((item) => (
+                <div
+                  key={item.id}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 10,
+                    padding: '16px 18px',
+                    borderRadius: 14,
+                    backgroundColor: 'var(--bg-surface)',
+                    border: '1px solid var(--border-highlight)',
+                    boxShadow: '0 4px 14px rgba(0, 0, 0, 0.25)',
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  {/* Top row: Word & Delete Button */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span
+                      style={{
+                        fontSize: 18,
+                        fontWeight: 700,
+                        color: 'var(--accent-gold)',
+                        fontFamily: 'var(--font-serif)',
+                        letterSpacing: '0.3px',
+                      }}
+                    >
+                      {item.word}
+                    </span>
+
+                    <button
+                      className="icon-btn"
+                      onClick={() => handleDeleteVocab(item.id)}
+                      aria-label={`Delete ${item.word}`}
+                      title="Delete word"
+                      style={{ width: 32, height: 32, color: 'var(--text-muted)' }}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+
+                  {/* Definition */}
+                  <p
+                    style={{
+                      margin: 0,
+                      fontSize: 14,
+                      lineHeight: 1.6,
+                      color: 'var(--text-primary)',
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    {item.definition}
+                  </p>
+
+                  {/* Metadata: Book & Date */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      gap: 8,
+                      fontSize: 12,
+                      color: 'var(--text-muted)',
+                      paddingTop: 8,
+                      borderTop: '1px solid var(--border-subtle)',
+                    }}
+                  >
+                    {item.book && (
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 4,
+                          color: 'var(--text-secondary)',
+                          fontWeight: 600,
+                        }}
+                      >
+                        <BookOpen size={12} color="var(--accent-gold)" />
+                        <span
+                          style={{
+                            maxWidth: 200,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {item.book}
+                        </span>
+                      </span>
+                    )}
+
+                    {item.date && (
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                        {formatActionDate(item.date)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      ) : activeTab === 'actions' ? (
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Action Filter Pills */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {(['all', 'pending', 'done'] as const).map((filter) => {
+              const count =
+                filter === 'all'
+                  ? actions.length
+                  : filter === 'pending'
+                  ? pendingActionsCount
+                  : actions.length - pendingActionsCount;
+              const isActive = actionFilter === filter;
+              return (
+                <button
+                  key={filter}
+                  onClick={() => setActionFilter(filter)}
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: 20,
+                    fontSize: 13,
+                    fontWeight: 600,
+                    border: isActive
+                      ? '1px solid var(--border-highlight)'
+                      : '1px solid var(--border-subtle)',
+                    backgroundColor: isActive ? 'var(--bg-elevated)' : 'transparent',
+                    color: isActive ? 'var(--accent-gold)' : 'var(--text-muted)',
+                    cursor: 'pointer',
+                    textTransform: 'capitalize',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  {filter} ({count})
+                </button>
+              );
+            })}
+          </div>
+
+          {filteredActions.length === 0 ? (
+            /* Empty State */
+            <div
+              style={{
+                padding: '48px 24px',
+                textAlign: 'center',
+                backgroundColor: 'var(--bg-surface)',
+                borderRadius: 16,
+                border: '1px dashed var(--border-subtle)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 12,
+              }}
+            >
+              <div
+                style={{
+                  width: 52,
+                  height: 52,
+                  borderRadius: 16,
+                  backgroundColor: 'rgba(212, 175, 85, 0.1)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: 'var(--accent-gold)',
+                }}
+              >
+                <CheckSquare size={26} />
+              </div>
+              <h3 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>
+                {actionFilter === 'done'
+                  ? 'No completed actions yet'
+                  : actionFilter === 'pending'
+                  ? 'All caught up!'
+                  : 'No chapter action steps yet'}
+              </h3>
+              <p style={{ fontSize: 13, color: 'var(--text-muted)', maxWidth: 320, lineHeight: 1.5, margin: 0 }}>
+                When you finish a chapter in an EPUB or tap &ldquo;Finish Chapter&rdquo; in a PDF, you&apos;ll be prompted to record an action step here.
+              </p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {filteredActions.map((action) => (
+                <div
+                  key={action.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: 14,
+                    padding: '14px 16px',
+                    borderRadius: 14,
+                    backgroundColor: 'var(--bg-surface)',
+                    border: action.done
+                      ? '1px solid var(--border-subtle)'
+                      : '1px solid var(--border-highlight)',
+                    opacity: action.done ? 0.65 : 1,
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  {/* Checkbox button */}
+                  <button
+                    onClick={() => handleToggleAction(action)}
+                    aria-label={action.done ? 'Mark as incomplete' : 'Mark as done'}
+                    style={{
+                      width: 26,
+                      height: 26,
+                      borderRadius: 8,
+                      border: action.done
+                        ? '1px solid var(--accent-gold)'
+                        : '2px solid var(--border-subtle)',
+                      backgroundColor: action.done ? 'var(--accent-gold)' : 'transparent',
+                      color: action.done ? '#141210' : 'transparent',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                      marginTop: 2,
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    {action.done === 1 && <Check size={16} strokeWidth={3} />}
+                  </button>
+
+                  {/* Action content */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p
+                      style={{
+                        margin: 0,
+                        fontSize: 15,
+                        fontWeight: 500,
+                        lineHeight: 1.5,
+                        color: action.done ? 'var(--text-muted)' : 'var(--text-primary)',
+                        textDecoration: action.done ? 'line-through' : 'none',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {action.text}
+                    </p>
+
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        gap: 8,
+                        marginTop: 8,
+                        fontSize: 12,
+                        color: 'var(--text-muted)',
+                      }}
+                    >
+                      {action.bookTitle && (
+                        <span
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            color: 'var(--text-secondary)',
+                            fontWeight: 600,
+                          }}
+                        >
+                          <BookOpen size={12} color="var(--accent-gold)" />
+                          <span
+                            style={{
+                              maxWidth: 180,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {action.bookTitle}
+                          </span>
+                        </span>
+                      )}
+
+                      {action.loc && (
+                        <span className="badge badge-gold" style={{ fontSize: 10, padding: '2px 6px' }}>
+                          {action.loc}
+                        </span>
+                      )}
+
+                      {action.created && (
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          {formatActionDate(action.created)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Delete button */}
+                  <button
+                    className="icon-btn"
+                    onClick={() => handleDeleteAction(action.id)}
+                    aria-label="Delete action"
+                    title="Delete action"
+                    style={{ width: 32, height: 32, flexShrink: 0 }}
+                  >
+                    <Trash2 size={16} color="var(--text-muted)" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      ) : (
+        <>
+          {/* Prominent "Continue Reading" Action */}
+          {recentBook && !searchQuery && (
         <section
           style={{
             padding: 16,
@@ -344,6 +924,154 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             <span>Resume Reading</span>
           </button>
         </section>
+      )}
+
+      {/* Daily Review Button */}
+      {onOpenReview && !searchQuery && (
+        <button
+          onClick={onOpenReview}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            width: '100%',
+            padding: '14px 16px',
+            borderRadius: 14,
+            background: dueReviewCount > 0
+              ? 'linear-gradient(135deg, rgba(97, 175, 239, 0.12), rgba(152, 195, 121, 0.08))'
+              : 'var(--bg-surface)',
+            border: dueReviewCount > 0
+              ? '1px solid rgba(97, 175, 239, 0.3)'
+              : '1px solid var(--border-subtle)',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease',
+            textAlign: 'left',
+          }}
+        >
+          <div
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: 12,
+              background: dueReviewCount > 0
+                ? 'linear-gradient(135deg, rgba(97, 175, 239, 0.2), rgba(152, 195, 121, 0.15))'
+                : 'var(--bg-elevated)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+            }}
+          >
+            <Brain size={22} color={dueReviewCount > 0 ? 'var(--info)' : 'var(--text-muted)'} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 600,
+                color: dueReviewCount > 0 ? 'var(--text-primary)' : 'var(--text-muted)',
+              }}
+            >
+              Daily Review
+            </div>
+            <div
+              style={{
+                fontSize: 12,
+                color: dueReviewCount > 0 ? 'var(--info)' : 'var(--text-muted)',
+                marginTop: 1,
+              }}
+            >
+              {dueReviewCount > 0
+                ? `${dueReviewCount} card${dueReviewCount > 1 ? 's' : ''} due today`
+                : 'All caught up!'}
+            </div>
+          </div>
+          {dueReviewCount > 0 && (
+            <div
+              style={{
+                padding: '4px 10px',
+                borderRadius: 20,
+                backgroundColor: 'rgba(97, 175, 239, 0.15)',
+                border: '1px solid rgba(97, 175, 239, 0.3)',
+                fontSize: 13,
+                fontWeight: 700,
+                color: 'var(--info)',
+              }}
+            >
+              {dueReviewCount}
+            </div>
+          )}
+        </button>
+      )}
+
+      {/* Reading Stats & Daily Goal Button */}
+      {onOpenStats && !searchQuery && (
+        <button
+          onClick={onOpenStats}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            width: '100%',
+            padding: '14px 16px',
+            borderRadius: 14,
+            background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(168, 85, 247, 0.08))',
+            border: '1px solid rgba(99, 102, 241, 0.25)',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease',
+            textAlign: 'left',
+          }}
+        >
+          <div
+            style={{
+              width: 42,
+              height: 42,
+              borderRadius: 12,
+              background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(168, 85, 247, 0.2))',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+            }}
+          >
+            <TrendingUp size={22} color="#818cf8" />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 600,
+                color: 'var(--text-primary)',
+              }}
+            >
+              Reading Stats & Goals
+            </div>
+            <div
+              style={{
+                fontSize: 12,
+                color: 'var(--text-secondary)',
+                marginTop: 1,
+              }}
+            >
+              {todayReadingSeconds > 0
+                ? `${Math.round(todayReadingSeconds / 60)} min read today • 7-day pace & streak`
+                : 'Track daily reading time, streaks & book pace'}
+            </div>
+          </div>
+          <div
+            style={{
+              padding: '4px 10px',
+              borderRadius: 20,
+              backgroundColor: 'rgba(99, 102, 241, 0.15)',
+              border: '1px solid rgba(99, 102, 241, 0.3)',
+              fontSize: 12,
+              fontWeight: 700,
+              color: '#818cf8',
+            }}
+          >
+            View
+          </div>
+        </button>
       )}
 
       {/* Library Books List */}
@@ -547,6 +1275,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           </div>
         )}
       </section>
+        </>
+      )}
 
       {/* Delete Confirmation Modal */}
       {bookToDelete && (

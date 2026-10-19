@@ -279,13 +279,45 @@ html, body, #root {
   border: 1px solid rgba(152, 195, 121, 0.3);
 }
 
-/* PDF Canvas Filters */
+/* PDF Canvas Filters & Theme Tints */
 .pdf-filter-warm {
   filter: sepia(0.28) contrast(0.96) brightness(0.95);
 }
 
 .pdf-filter-night {
   filter: invert(0.88) hue-rotate(180deg) contrast(0.92);
+}
+
+/* Feature 12: PDF Theme Tints */
+.pdf-theme-dark {
+  filter: invert(0.92) hue-rotate(180deg) sepia(0.25) contrast(0.95);
+}
+
+.pdf-theme-sepia {
+  filter: sepia(0.42) contrast(0.96) brightness(0.95);
+}
+
+.pdf-theme-light {
+  filter: none;
+}
+
+/* Focus Mode Progress Line */
+.focus-progress-line {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background-color: rgba(255, 255, 255, 0.08);
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.focus-progress-fill {
+  height: 100%;
+  background: var(--accent-gold);
+  box-shadow: 0 0 6px rgba(212, 175, 85, 0.5);
+  transition: width 0.25s ease;
 }
 
 /* Touch controls overlay */

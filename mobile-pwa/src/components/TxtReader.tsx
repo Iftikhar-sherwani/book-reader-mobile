@@ -12,6 +12,7 @@ interface TxtReaderProps {
   onPageChange: (page: number) => void;
   onToggleControls: () => void;
   onError: (err: string) => void;
+  onLookupWord?: (word: string) => void;
 }
 
 export const TxtReader: React.FC<TxtReaderProps> = ({
@@ -23,6 +24,7 @@ export const TxtReader: React.FC<TxtReaderProps> = ({
   onPageChange,
   onToggleControls,
   onError,
+  onLookupWord,
 }) => {
   const [parsed, setParsed] = useState<ParsedTxt | null>(null);
   const [loading, setLoading] = useState(true);
@@ -78,6 +80,17 @@ export const TxtReader: React.FC<TxtReaderProps> = ({
     onToggleControls();
   };
 
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const sel = window.getSelection();
+    const raw = sel ? sel.toString().trim() : '';
+    const clean = raw.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
+    if (clean && clean.length >= 1 && !clean.includes(' ')) {
+      window.getSelection()?.removeAllRanges();
+      onLookupWord?.(clean);
+    }
+  };
+
   if (loading) {
     return (
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent-gold)' }}>
@@ -96,6 +109,7 @@ export const TxtReader: React.FC<TxtReaderProps> = ({
     <div
       ref={scrollRef}
       onClick={handleContainerClick}
+      onDoubleClick={handleDoubleClick}
       style={{
         flex: 1,
         width: '100%',
@@ -107,6 +121,7 @@ export const TxtReader: React.FC<TxtReaderProps> = ({
       }}
     >
       <div
+        onDoubleClick={handleDoubleClick}
         style={{
           maxWidth: 680,
           margin: '0 auto',

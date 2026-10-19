@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { Book, Mark } from '../types';
-import { Highlighter, Trash2, X, Download, Clock } from 'lucide-react';
+import { Highlighter, Trash2, X, Download, Clock, Sparkles } from 'lucide-react';
 import { exportBookMarks } from '../services/marksExporter';
+import { QuoteCardModal } from './QuoteCardModal';
 
 interface MarksDrawerProps {
   book: Book;
@@ -25,6 +26,8 @@ export const MarksDrawer: React.FC<MarksDrawerProps> = ({
   onDeleteMark,
   onClose,
 }) => {
+  const [selectedQuoteCardMark, setSelectedQuoteCardMark] = useState<Mark | null>(null);
+
   const handleExport = () => {
     exportBookMarks(book, marks);
   };
@@ -160,6 +163,33 @@ export const MarksDrawer: React.FC<MarksDrawerProps> = ({
                         📝 {m.note}
                       </p>
                     )}
+
+                    {/* Make quote card button */}
+                    <div style={{ marginTop: 8 }}>
+                      <button
+                        className="secondary-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedQuoteCardMark(m);
+                        }}
+                        title="Make quote card (1080×1080)"
+                        style={{
+                          height: 28,
+                          padding: '0 10px',
+                          fontSize: 11,
+                          borderRadius: 8,
+                          backgroundColor: 'rgba(212, 175, 85, 0.15)',
+                          color: 'var(--accent-gold)',
+                          border: '1px solid rgba(212, 175, 85, 0.35)',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 5,
+                        }}
+                      >
+                        <Sparkles size={12} />
+                        <span>Make quote card</span>
+                      </button>
+                    </div>
                   </div>
 
                   <button
@@ -177,6 +207,15 @@ export const MarksDrawer: React.FC<MarksDrawerProps> = ({
               );
             })}
           </div>
+        )}
+
+        {/* Quote Card Modal */}
+        {selectedQuoteCardMark && (
+          <QuoteCardModal
+            book={book}
+            mark={selectedQuoteCardMark}
+            onClose={() => setSelectedQuoteCardMark(null)}
+          />
         )}
       </div>
     </div>

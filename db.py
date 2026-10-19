@@ -7,10 +7,11 @@ Handles SQLite storage in reader.db for:
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("READER_DB_PATH", Path(__file__).resolve().parent / "reader.db"))
@@ -96,6 +97,56 @@ def init_db(db_path: Path | str | None = None) -> None:
                 note TEXT,
                 color TEXT,
                 created TEXT
+            )
+            """
+        )
+
+        # Reviews table for spaced repetition
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reviews (
+                mark_id INTEGER PRIMARY KEY,
+                due TEXT,
+                interval_days INTEGER
+            )
+            """
+        )
+
+        # Actions table for chapter action steps
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id TEXT,
+                loc TEXT,
+                text TEXT,
+                created TEXT,
+                done INTEGER DEFAULT 0
+            )
+            """
+        )
+
+        # Vocab table for saved dictionary words
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vocab (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT NOT NULL,
+                definition TEXT,
+                book TEXT,
+                date TEXT
+            )
+            """
+        )
+
+        # Sessions table for reading time tracking
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                book_id TEXT,
+                start TEXT,
+                seconds INTEGER
             )
             """
         )
@@ -373,7 +424,10 @@ def get_all_books(db_path: Path | str | None = None) -> list[dict]:
 
 
 def add_mark(book_id: str, loc: str, quote: str = "", note: str = "", color: str = "", created: str | None = None, db_path: Path | str | None = None) -> int:
-    """Add a mark (bookmark / highlight / annotation) for a book."""
+    """Add a mark (bookmark / highlight / annotation) for a book.
+
+    Also creates a review row due tomorrow with interval 1 day.
+    """
     if created is None:
         created = datetime.now().isoformat()
     with get_db(db_path) as conn:
@@ -384,7 +438,13 @@ def add_mark(book_id: str, loc: str, quote: str = "", note: str = "", color: str
             """,
             (book_id, str(loc), quote, note, color, created),
         )
-        return cursor.lastrowid
+        mark_id = cursor.lastrowid
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        conn.execute(
+            "INSERT OR IGNORE INTO reviews (mark_id, due, interval_days) VALUES (?, ?, ?)",
+            (mark_id, tomorrow, 1),
+        )
+        return mark_id
 
 
 def get_marks(book_id: str, db_path: Path | str | None = None) -> list[dict]:
@@ -398,9 +458,10 @@ def get_marks(book_id: str, db_path: Path | str | None = None) -> list[dict]:
 
 
 def delete_mark(mark_id: int, db_path: Path | str | None = None) -> None:
-    """Delete a mark by id."""
+    """Delete a mark by id, along with its associated review entry."""
     with get_db(db_path) as conn:
         conn.execute("DELETE FROM marks WHERE id = ?", (mark_id,))
+        conn.execute("DELETE FROM reviews WHERE mark_id = ?", (mark_id,))
 
 
 def get_mark(mark_id: int, db_path: Path | str | None = None) -> dict | None:
@@ -520,4 +581,254 @@ def search_pages(
             ).fetchall()
 
     return [dict(r) for r in rows]
+
+
+# ── Spaced-Repetition Reviews ────────────────────────────────────────
+
+def get_due_review_count(db_path: Path | str | None = None) -> int:
+    """Return the number of review cards due today or earlier."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM reviews WHERE due <= ?", (today,)
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+
+def get_due_reviews(limit: int = 10, db_path: Path | str | None = None) -> list[dict]:
+    """Return up to *limit* review cards that are due today or earlier.
+
+    Each dict has: mark_id, due, interval_days, quote, note, book_title.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_db(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT r.mark_id, r.due, r.interval_days,
+                   m.quote, m.note,
+                   b.title AS book_title
+            FROM reviews r
+            JOIN marks m ON m.id = r.mark_id
+            JOIN books b ON b.id = m.book_id
+            WHERE r.due <= ?
+            ORDER BY r.due ASC
+            LIMIT ?
+            """,
+            (today, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def rate_review(mark_id: int, rating: str, db_path: Path | str | None = None) -> None:
+    """Update a review card after the user rates it.
+
+    rating must be one of: 'forgot', 'hard', 'good', 'easy'.
+    """
+    multiplier = {"forgot": 0, "hard": 1.2, "good": 2, "easy": 3}
+    if rating not in multiplier:
+        raise ValueError(f"Invalid rating '{rating}'; expected forgot/hard/good/easy")
+
+    with get_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT interval_days FROM reviews WHERE mark_id = ?", (mark_id,)
+        ).fetchone()
+        if row is None:
+            return
+
+        old_interval = row["interval_days"]
+        if rating == "forgot":
+            new_interval = 1
+        else:
+            new_interval = math.ceil(old_interval * multiplier[rating])
+
+        new_due = (datetime.now() + timedelta(days=new_interval)).strftime("%Y-%m-%d")
+        conn.execute(
+            "UPDATE reviews SET due = ?, interval_days = ? WHERE mark_id = ?",
+            (new_due, new_interval, mark_id),
+        )
+
+
+def delete_review(mark_id: int, db_path: Path | str | None = None) -> None:
+    """Delete a review entry (e.g. when the associated mark is deleted)."""
+    with get_db(db_path) as conn:
+        conn.execute("DELETE FROM reviews WHERE mark_id = ?", (mark_id,))
+
+
+# ── Chapter Actions ──────────────────────────────────────────────────
+
+def add_action(
+    book_id: str,
+    loc: str,
+    text: str,
+    db_path: Path | str | None = None,
+) -> int:
+    """Store an action step created upon finishing a chapter.
+    
+    actions(id, book_id, loc, text, created, done INTEGER DEFAULT 0)
+    """
+    created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO actions (book_id, loc, text, created, done)
+            VALUES (?, ?, ?, ?, 0)
+            """,
+            (book_id, loc, text, created),
+        )
+        return cursor.lastrowid
+
+
+def get_actions(
+    book_id: str | None = None,
+    db_path: Path | str | None = None,
+) -> list[dict]:
+    """Retrieve all chapter action steps, optionally filtered by book_id.
+    
+    Joins with books table to provide book_title when available.
+    """
+    with get_db(db_path) as conn:
+        if book_id:
+            rows = conn.execute(
+                """
+                SELECT a.id, a.book_id, a.loc, a.text, a.created, a.done,
+                       b.title AS book_title
+                FROM actions a
+                LEFT JOIN books b ON b.id = a.book_id
+                WHERE a.book_id = ?
+                ORDER BY a.created DESC, a.id DESC
+                """,
+                (book_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT a.id, a.book_id, a.loc, a.text, a.created, a.done,
+                       b.title AS book_title
+                FROM actions a
+                LEFT JOIN books b ON b.id = a.book_id
+                ORDER BY a.created DESC, a.id DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_action_done(
+    action_id: int,
+    done: int = 1,
+    db_path: Path | str | None = None,
+) -> None:
+    """Toggle or set the done flag (0 or 1) on an action step."""
+    with get_db(db_path) as conn:
+        conn.execute(
+            "UPDATE actions SET done = ? WHERE id = ?",
+            (1 if done else 0, action_id),
+        )
+
+
+def delete_action(action_id: int, db_path: Path | str | None = None) -> None:
+    """Delete an action step by id."""
+    with get_db(db_path) as conn:
+        conn.execute("DELETE FROM actions WHERE id = ?", (action_id,))
+
+
+# ── Vocabulary ────────────────────────────────────────────────────────
+
+def add_vocab(
+    word: str,
+    definition: str,
+    book: str,
+    date: str | None = None,
+    db_path: Path | str | None = None,
+) -> int:
+    """Store a vocabulary word, definition, book, and date in the vocab table."""
+    date_str = date or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO vocab (word, definition, book, date)
+            VALUES (?, ?, ?, ?)
+            """,
+            (word.strip(), definition.strip(), book.strip(), date_str),
+        )
+        return cursor.lastrowid
+
+
+def get_vocab(
+    book: str | None = None,
+    db_path: Path | str | None = None,
+) -> list[dict]:
+    """Retrieve all saved vocabulary entries, optionally filtered by book."""
+    with get_db(db_path) as conn:
+        if book:
+            rows = conn.execute(
+                """
+                SELECT id, word, definition, book, date
+                FROM vocab
+                WHERE book = ?
+                ORDER BY id DESC
+                """,
+                (book,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, word, definition, book, date
+                FROM vocab
+                ORDER BY id DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_vocab(vocab_id: int, db_path: Path | str | None = None) -> None:
+    """Delete a saved vocabulary word by id."""
+    with get_db(db_path) as conn:
+        conn.execute("DELETE FROM vocab WHERE id = ?", (vocab_id,))
+
+
+# ── Reading Sessions ─────────────────────────────────────────────────
+
+def add_session(
+    book_id: str,
+    start: str,
+    seconds: int,
+    db_path: Path | str | None = None,
+) -> int:
+    """Record a reading session in sessions(id, book_id, start, seconds)."""
+    with get_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO sessions (book_id, start, seconds)
+            VALUES (?, ?, ?)
+            """,
+            (book_id, start, seconds),
+        )
+        return cursor.lastrowid
+
+
+def get_sessions(
+    book_id: str | None = None,
+    db_path: Path | str | None = None,
+) -> list[dict]:
+    """Retrieve all reading sessions, optionally filtered by book_id."""
+    with get_db(db_path) as conn:
+        if book_id:
+            rows = conn.execute(
+                """
+                SELECT id, book_id, start, seconds
+                FROM sessions
+                WHERE book_id = ?
+                ORDER BY start DESC, id DESC
+                """,
+                (book_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, book_id, start, seconds
+                FROM sessions
+                ORDER BY start DESC, id DESC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
 

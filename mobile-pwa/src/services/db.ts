@@ -1,8 +1,8 @@
 import { openDB, type IDBPDatabase } from 'idb';
-import type { Book, ReadingProgress, Bookmark, ReaderSettings, Mark, IndexedPage, SearchResult } from '../types';
+import type { Book, ReadingProgress, Bookmark, ReaderSettings, Mark, Review, ChapterAction, VocabWord, ReadingSession, IndexedPage, SearchResult } from '../types';
 
 const DB_NAME = 'book_reader_db';
-const DB_VERSION = 2;
+const DB_VERSION = 6;
 
 export const DEFAULT_SETTINGS: ReaderSettings = {
   theme: 'dark',
@@ -12,6 +12,8 @@ export const DEFAULT_SETTINGS: ReaderSettings = {
   fontFamily: 'serif',
   pdfFitMode: 'width',
   tapToTurn: true,
+  dailyGoalMinutes: 15,
+  lineWidth: 680,
 };
 
 let dbPromise: Promise<IDBPDatabase> | null = null;
@@ -65,6 +67,35 @@ export function getDb(): Promise<IDBPDatabase> {
         // Settings store
         if (!db.objectStoreNames.contains('settings')) {
           db.createObjectStore('settings', { keyPath: 'key' });
+        }
+
+        // Reviews store for spaced-repetition
+        if (!db.objectStoreNames.contains('reviews')) {
+          const reviewStore = db.createObjectStore('reviews', { keyPath: 'markId' });
+          reviewStore.createIndex('due', 'due');
+        }
+
+        // Actions store for chapter action steps
+        if (!db.objectStoreNames.contains('actions')) {
+          const actionStore = db.createObjectStore('actions', { keyPath: 'id' });
+          actionStore.createIndex('book_id', 'book_id');
+          actionStore.createIndex('done', 'done');
+          actionStore.createIndex('created', 'created');
+        }
+
+        // Vocab store for saved dictionary words
+        if (!db.objectStoreNames.contains('vocab')) {
+          const vocabStore = db.createObjectStore('vocab', { keyPath: 'id' });
+          vocabStore.createIndex('word', 'word');
+          vocabStore.createIndex('book', 'book');
+          vocabStore.createIndex('date', 'date');
+        }
+
+        // Sessions store for reading time tracking
+        if (!db.objectStoreNames.contains('sessions')) {
+          const sessionStore = db.createObjectStore('sessions', { keyPath: 'id' });
+          sessionStore.createIndex('book_id', 'book_id');
+          sessionStore.createIndex('start', 'start');
         }
       },
     });
@@ -271,7 +302,11 @@ export async function getAllMarks(): Promise<Mark[]> {
 
 export async function deleteMark(id: string): Promise<void> {
   const db = await getDb();
-  await db.delete('marks', id);
+  const tx = db.transaction(['marks', 'reviews'], 'readwrite');
+  await tx.objectStore('marks').delete(id);
+  // Also delete the associated review if any
+  try { await tx.objectStore('reviews').delete(id); } catch (_) { /* no review */ }
+  await tx.done;
 }
 
 // ── Full-Text Search Indexing ───────────────────────────────────────
@@ -354,5 +389,273 @@ export async function searchPages(query: string, filterBookId?: string): Promise
   }
 
   return results;
+}
+
+// ── Reviews (Spaced Repetition) ─────────────────────────────────────
+
+function getTodayDateString(): string {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function addDays(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/** Create a review entry for a mark, due tomorrow with interval 1. */
+export async function createReview(markId: string): Promise<void> {
+  const db = await getDb();
+  const existing = await db.get('reviews', markId);
+  if (existing) return; // Don't overwrite existing review schedule
+  const review: Review = {
+    markId,
+    due: addDays(1),
+    intervalDays: 1,
+  };
+  await db.put('reviews', review);
+}
+
+/** Get the count of reviews due today or earlier. */
+export async function getDueReviewCount(): Promise<number> {
+  const db = await getDb();
+  const today = getTodayDateString();
+  const all = await db.getAll('reviews');
+  return all.filter((r: Review) => r.due <= today).length;
+}
+
+/** Get up to `limit` review cards that are due today or earlier, joined with mark + book data. */
+export async function getDueReviews(limit = 10): Promise<{
+  markId: string;
+  due: string;
+  intervalDays: number;
+  quote: string;
+  note?: string;
+  bookTitle: string;
+}[]> {
+  const db = await getDb();
+  const today = getTodayDateString();
+  const allReviews = await db.getAll('reviews');
+  const dueReviews = (allReviews as Review[]).filter((r) => r.due <= today);
+  dueReviews.sort((a, b) => a.due.localeCompare(b.due));
+  const limited = dueReviews.slice(0, limit);
+
+  const books = await getAllBooks();
+  const bookMap = new Map(books.map((b) => [b.id, b.title]));
+
+  const results: {
+    markId: string;
+    due: string;
+    intervalDays: number;
+    quote: string;
+    note?: string;
+    bookTitle: string;
+  }[] = [];
+
+  for (const rev of limited) {
+    const mark = await db.get('marks', rev.markId) as Mark | undefined;
+    if (!mark) continue;
+    results.push({
+      markId: rev.markId,
+      due: rev.due,
+      intervalDays: rev.intervalDays,
+      quote: mark.quote,
+      note: mark.note,
+      bookTitle: bookMap.get(mark.bookId) || 'Unknown',
+    });
+  }
+
+  return results;
+}
+
+/** Rate a review card: forgot, hard, good, or easy. */
+export async function rateReview(
+  markId: string,
+  rating: 'forgot' | 'hard' | 'good' | 'easy'
+): Promise<void> {
+  const db = await getDb();
+  const review = await db.get('reviews', markId) as Review | undefined;
+  if (!review) return;
+
+  let newInterval: number;
+  switch (rating) {
+    case 'forgot':
+      newInterval = 1;
+      break;
+    case 'hard':
+      newInterval = Math.ceil(review.intervalDays * 1.2);
+      break;
+    case 'good':
+      newInterval = Math.ceil(review.intervalDays * 2);
+      break;
+    case 'easy':
+      newInterval = Math.ceil(review.intervalDays * 3);
+      break;
+  }
+
+  await db.put('reviews', {
+    markId,
+    due: addDays(newInterval),
+    intervalDays: newInterval,
+  });
+}
+
+// ── Chapter Actions ──────────────────────────────────────────────────
+
+/** Store an action step created upon finishing a chapter. */
+export async function saveAction(
+  bookId: string,
+  loc: string,
+  text: string
+): Promise<ChapterAction> {
+  const db = await getDb();
+  const action: ChapterAction = {
+    id: crypto.randomUUID(),
+    book_id: bookId,
+    loc,
+    text: text.trim(),
+    created: new Date().toISOString(),
+    done: 0,
+  };
+  await db.put('actions', action);
+  return action;
+}
+
+/** Get all chapter actions, optionally filtered by bookId, with bookTitle populated. */
+export async function getActions(filterBookId?: string): Promise<ChapterAction[]> {
+  const db = await getDb();
+  let allActions: ChapterAction[] = [];
+  if (filterBookId) {
+    allActions = await db.getAllFromIndex('actions', 'book_id', filterBookId);
+  } else {
+    allActions = await db.getAll('actions');
+  }
+
+  // Populate book title
+  const books = await getAllBooks();
+  const bookMap = new Map(books.map((b) => [b.id, b.title]));
+
+  allActions.forEach((act) => {
+    act.bookTitle = bookMap.get(act.book_id) || 'Unknown Book';
+  });
+
+  // Sort: newest first
+  return allActions.sort((a, b) => b.created.localeCompare(a.created));
+}
+
+/** Set or toggle done status for an action. */
+export async function setActionDone(id: string, done: number): Promise<void> {
+  const db = await getDb();
+  const item = (await db.get('actions', id)) as ChapterAction | undefined;
+  if (!item) return;
+  item.done = done;
+  await db.put('actions', item);
+}
+
+/** Delete an action by id. */
+export async function deleteAction(id: string): Promise<void> {
+  const db = await getDb();
+  await db.delete('actions', id);
+}
+
+// ── Vocabulary (Saved Dictionary Words) ──────────────────────────────
+
+/** Store a vocabulary word, definition, book, and date in the vocab table. */
+export async function saveVocabWord(
+  word: string,
+  definition: string,
+  book: string
+): Promise<VocabWord> {
+  const db = await getDb();
+  const vocab: VocabWord = {
+    id: crypto.randomUUID(),
+    word: word.trim(),
+    definition: definition.trim(),
+    book: book.trim() || 'General',
+    date: new Date().toISOString(),
+  };
+  await db.put('vocab', vocab);
+  return vocab;
+}
+
+/** Get all saved vocabulary words, sorted with newest first. */
+export async function getAllVocab(): Promise<VocabWord[]> {
+  const db = await getDb();
+  const all = (await db.getAll('vocab')) as VocabWord[];
+  return all.sort((a, b) => b.date.localeCompare(a.date));
+}
+
+/** Delete a saved vocabulary word by id. */
+export async function deleteVocabWord(id: string): Promise<void> {
+  const db = await getDb();
+  await db.delete('vocab', id);
+}
+
+/** Check if a word is already in the vocabulary list. */
+export async function isWordSaved(word: string): Promise<boolean> {
+  const db = await getDb();
+  const normalized = word.trim().toLowerCase();
+  const all = (await db.getAll('vocab')) as VocabWord[];
+  return all.some((v) => v.word.toLowerCase() === normalized);
+}
+
+// ── Reading Sessions & Time Tracking ────────────────────────────────
+
+/** Store a reading session (id, book_id, start, seconds). */
+export async function saveSession(
+  bookId: string,
+  start: string,
+  seconds: number
+): Promise<ReadingSession | null> {
+  if (seconds <= 0) return null;
+  const db = await getDb();
+  const session: ReadingSession = {
+    id: crypto.randomUUID(),
+    book_id: bookId,
+    start,
+    seconds: Math.round(seconds),
+  };
+  await db.put('sessions', session);
+  return session;
+}
+
+/** Get all reading sessions. */
+export async function getAllSessions(): Promise<ReadingSession[]> {
+  const db = await getDb();
+  return db.getAll('sessions');
+}
+
+/** Get reading sessions for a specific book. */
+export async function getBookSessions(bookId: string): Promise<ReadingSession[]> {
+  const db = await getDb();
+  return db.getAllFromIndex('sessions', 'book_id', bookId);
+}
+
+/** Get total reading seconds accumulated today (local date). */
+export async function getTodayReadingSeconds(): Promise<number> {
+  const db = await getDb();
+  const all = (await db.getAll('sessions')) as ReadingSession[];
+  const todayStr = getTodayDateString(); // "YYYY-MM-DD"
+  
+  return all
+    .filter((s) => {
+      try {
+        const d = new Date(s.start);
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}` === todayStr;
+      } catch (_) {
+        return false;
+      }
+    })
+    .reduce((total, s) => total + (s.seconds || 0), 0);
 }
 

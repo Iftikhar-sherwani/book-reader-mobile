@@ -11,6 +11,9 @@ import {
   saveMark,
   deleteMark,
   updateBookMetadata,
+  createReview,
+  saveAction,
+  saveSession,
 } from '../services/db';
 import { indexBook } from '../services/indexerService';
 import { PdfReader } from './PdfReader';
@@ -19,6 +22,8 @@ import { TxtReader } from './TxtReader';
 import { BookmarksDrawer } from './BookmarksDrawer';
 import { MarksDrawer } from './MarksDrawer';
 import { JumpToPageModal } from './JumpToPageModal';
+import { ChapterActionDialog } from './ChapterActionDialog';
+import { DictionaryPopup } from './DictionaryPopup';
 import {
   ChevronLeft,
   ChevronRight,
@@ -30,6 +35,7 @@ import {
   AlertTriangle,
   Loader2,
   ArrowLeft,
+  Target,
 } from 'lucide-react';
 
 interface ReaderViewProps {
@@ -41,6 +47,9 @@ interface ReaderViewProps {
   isMarksOpen?: boolean;
   onCloseMarks?: () => void;
   onOpenMarks?: () => void;
+  onSessionRecorded?: (seconds: number) => void;
+  onUpdateSettings?: (newSettings: Partial<ReaderSettings>) => void;
+  onFocusModeChange?: (isFocus: boolean) => void;
 }
 
 export const ReaderView: React.FC<ReaderViewProps> = ({
@@ -52,10 +61,107 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   isMarksOpen,
   onCloseMarks,
   onOpenMarks,
+  onSessionRecorded,
+  onUpdateSettings,
+  onFocusModeChange,
 }) => {
   const [blob, setBlob] = useState<Blob | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Reading Time Tracking (Feature 11)
+  // - Starts when book is open and window is active.
+  // - Stops after 60 seconds with no mouse or key activity.
+  // - Stores sessions(id, book_id, start, seconds).
+  const sessionStartTimeRef = useRef<string>(new Date().toISOString());
+  const activeSecondsRef = useRef<number>(0);
+  const lastActivityRef = useRef<number>(Date.now());
+  const windowActiveRef = useRef<boolean>(
+    typeof document !== 'undefined' ? document.visibilityState === 'visible' : true
+  );
+
+  const flushSession = useCallback(async () => {
+    const sec = activeSecondsRef.current;
+    if (sec > 0 && book.id) {
+      const startIso = sessionStartTimeRef.current;
+      activeSecondsRef.current = 0;
+      sessionStartTimeRef.current = new Date().toISOString();
+      try {
+        await saveSession(book.id, startIso, sec);
+        onSessionRecorded?.(sec);
+      } catch (err) {
+        console.warn('Failed to save reading session:', err);
+      }
+    }
+  }, [book.id, onSessionRecorded]);
+
+  useEffect(() => {
+    sessionStartTimeRef.current = new Date().toISOString();
+    activeSecondsRef.current = 0;
+    lastActivityRef.current = Date.now();
+    windowActiveRef.current = document.visibilityState === 'visible';
+
+    const onUserActivity = () => {
+      lastActivityRef.current = Date.now();
+    };
+
+    const onVisibilityChange = () => {
+      const isVisible = document.visibilityState === 'visible';
+      windowActiveRef.current = isVisible;
+      if (!isVisible) {
+        flushSession();
+      } else {
+        lastActivityRef.current = Date.now();
+        sessionStartTimeRef.current = new Date().toISOString();
+      }
+    };
+
+    const onFocus = () => {
+      windowActiveRef.current = true;
+      lastActivityRef.current = Date.now();
+    };
+
+    const onBlur = () => {
+      windowActiveRef.current = false;
+      flushSession();
+    };
+
+    window.addEventListener('mousemove', onUserActivity, { passive: true });
+    window.addEventListener('mousedown', onUserActivity, { passive: true });
+    window.addEventListener('keydown', onUserActivity, { passive: true });
+    window.addEventListener('touchstart', onUserActivity, { passive: true });
+    window.addEventListener('scroll', onUserActivity, { passive: true });
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+
+    const interval = setInterval(() => {
+      const isWindowActive = windowActiveRef.current && document.visibilityState === 'visible';
+      const isWithin60s = Date.now() - lastActivityRef.current <= 60000;
+
+      if (isWindowActive && isWithin60s) {
+        activeSecondsRef.current += 1;
+        // Flush every 30 seconds for persistence
+        if (activeSecondsRef.current >= 30) {
+          flushSession();
+        }
+      }
+    }, 1000);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('mousemove', onUserActivity);
+      window.removeEventListener('mousedown', onUserActivity);
+      window.removeEventListener('keydown', onUserActivity);
+      window.removeEventListener('touchstart', onUserActivity);
+      window.removeEventListener('scroll', onUserActivity);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+      flushSession();
+    };
+  }, [book.id, flushSession]);
 
   // Navigation state
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -69,6 +175,45 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [marks, setMarks] = useState<Mark[]>([]);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<{
+    locationLabel: string;
+    onConfirm?: () => void;
+  } | null>(null);
+  const [dictionaryWord, setDictionaryWord] = useState<string | null>(null);
+  // Feature 12: Focus Mode (toggled with F key)
+  const [isFocusMode, setIsFocusMode] = useState(false);
+
+  useEffect(() => {
+    onFocusModeChange?.(isFocusMode);
+  }, [isFocusMode, onFocusModeChange]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        setIsFocusMode((prev) => {
+          const next = !prev;
+          showToast(next ? '✦ Focus Mode (Press F or Esc to exit)' : '✦ Exited Focus Mode');
+          return next;
+        });
+      } else if (e.key === 'Escape') {
+        setIsFocusMode(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const currentPageRef = useRef(currentPage);
   const scrollOffsetRef = useRef(scrollOffset);
@@ -190,12 +335,75 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
 
   const handleEpubChapterChange = useCallback(
     (chapterIndex: number, scroll: number) => {
-      setCurrentPage(chapterIndex);
-      setScrollOffset(scroll);
-      triggerSaveProgress(chapterIndex, scroll, totalPagesRef.current);
+      // If moving to the next chapter in EPUB, prompt: "What will you do with this?"
+      if (chapterIndex > currentPageRef.current) {
+        setPendingAction({
+          locationLabel: `Chapter ${currentPageRef.current}`,
+          onConfirm: () => {
+            setCurrentPage(chapterIndex);
+            setScrollOffset(scroll);
+            triggerSaveProgress(chapterIndex, scroll, totalPagesRef.current);
+          },
+        });
+      } else {
+        setCurrentPage(chapterIndex);
+        setScrollOffset(scroll);
+        triggerSaveProgress(chapterIndex, scroll, totalPagesRef.current);
+      }
     },
     [triggerSaveProgress]
   );
+
+  const handleNextPageClick = useCallback(() => {
+    if (currentPageRef.current >= totalPagesRef.current) return;
+    const nextPage = currentPageRef.current + 1;
+    if (book.format === 'epub') {
+      setPendingAction({
+        locationLabel: `Chapter ${currentPageRef.current}`,
+        onConfirm: () => {
+          handlePageChange(nextPage);
+        },
+      });
+    } else {
+      handlePageChange(nextPage);
+    }
+  }, [book.format, handlePageChange]);
+
+  const handleFinishChapter = useCallback(() => {
+    setPendingAction({
+      locationLabel: book.format === 'epub' ? `Chapter ${currentPageRef.current}` : `Page ${currentPageRef.current}`,
+      onConfirm: () => {},
+    });
+  }, [book.format]);
+
+  const handleSaveAction = async (actionText: string) => {
+    if (pendingAction) {
+      try {
+        await saveAction(book.id, pendingAction.locationLabel, actionText);
+        showToast('✦ Action step saved');
+      } catch (err) {
+        console.warn('Failed to save action:', err);
+      }
+      const cb = pendingAction.onConfirm;
+      setPendingAction(null);
+      if (cb) cb();
+    }
+  };
+
+  const handleSkipAction = () => {
+    if (pendingAction) {
+      const cb = pendingAction.onConfirm;
+      setPendingAction(null);
+      if (cb) cb();
+    }
+  };
+
+  const handleLookupWord = useCallback((word: string) => {
+    const clean = word.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
+    if (clean && clean.length >= 1) {
+      setDictionaryWord(clean);
+    }
+  }, []);
 
   // 4. Save progress on app background / navigation (visibilitychange and pagehide)
   useEffect(() => {
@@ -290,6 +498,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     };
     try {
       await saveMark(newMark);
+      await createReview(newMark.id);
       const updated = await getMarks(book.id);
       setMarks(updated);
       showToast('✦ Selection marked');
@@ -397,6 +606,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
           onAddMark={handleAddMark}
           onToggleControls={() => setControlsVisible(!controlsVisible)}
           onError={(err) => setError(err)}
+          onLookupWord={handleLookupWord}
         />
       )}
 
@@ -410,6 +620,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
           onPageChange={handlePageChange}
           onToggleControls={() => setControlsVisible(!controlsVisible)}
           onError={(err) => setError(err)}
+          onLookupWord={handleLookupWord}
         />
       )}
 
@@ -440,17 +651,17 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
 
       {/* Bottom Floating Navigation Toolbar */}
       <footer
-        className={`reading-controls controls-footer ${controlsVisible ? '' : 'controls-hidden'}`}
+        className={`reading-controls controls-footer ${controlsVisible && !isFocusMode ? '' : 'controls-hidden'}`}
         style={{
+          display: isFocusMode ? 'none' : 'flex',
           padding: '8px 16px calc(var(--safe-bottom) + 12px) 16px',
-          display: 'flex',
           flexDirection: 'column',
           gap: 8,
           zIndex: 50,
         }}
       >
-        {/* Secondary controls row: Zoom & Bookmark */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        {/* Secondary controls row: Zoom / EPUB Typography & Themes & Bookmarks */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
           {/* Zoom controls for PDF */}
           {book.format === 'pdf' ? (
             <div
@@ -501,12 +712,166 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
                 <ZoomIn size={16} />
               </button>
             </div>
+          ) : book.format === 'epub' ? (
+            /* EPUB Controls: Font Size A- / A+, Line Width slider, Themes */
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                backgroundColor: 'rgba(26, 23, 20, 0.9)',
+                backdropFilter: 'blur(8px)',
+                borderRadius: 10,
+                padding: '4px 8px',
+                border: '1px solid var(--border-subtle)',
+                flexWrap: 'wrap',
+              }}
+            >
+              {/* Font Size A- / A+ */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                <button
+                  className="icon-btn"
+                  onClick={() => onUpdateSettings?.({ fontSize: Math.max(12, (settings.fontSize || 18) - 1) })}
+                  disabled={(settings.fontSize || 18) <= 12}
+                  aria-label="Decrease font size"
+                  title="Smaller text (A-)"
+                  style={{ width: 30, height: 30, fontSize: 13, fontWeight: 700 }}
+                >
+                  A-
+                </button>
+                <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', minWidth: 26, textAlign: 'center' }}>
+                  {settings.fontSize || 18}
+                </span>
+                <button
+                  className="icon-btn"
+                  onClick={() => onUpdateSettings?.({ fontSize: Math.min(36, (settings.fontSize || 18) + 1) })}
+                  disabled={(settings.fontSize || 18) >= 36}
+                  aria-label="Increase font size"
+                  title="Larger text (A+)"
+                  style={{ width: 30, height: 30, fontSize: 14, fontWeight: 700 }}
+                >
+                  A+
+                </button>
+              </div>
+
+              <div style={{ width: 1, height: 16, backgroundColor: 'var(--border-subtle)' }} />
+
+              {/* Line Width Slider */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="Line Width">
+                  Width
+                </span>
+                <input
+                  type="range"
+                  min="460"
+                  max="1100"
+                  step="20"
+                  value={settings.lineWidth || 680}
+                  onChange={(e) => onUpdateSettings?.({ lineWidth: Number(e.target.value) })}
+                  title={`Line width: ${settings.lineWidth || 680}px`}
+                  aria-label="Line width"
+                  style={{ width: 68, height: 16, accentColor: 'var(--accent-gold)', cursor: 'pointer' }}
+                />
+              </div>
+
+              <div style={{ width: 1, height: 16, backgroundColor: 'var(--border-subtle)' }} />
+
+              {/* Themes: Light, Sepia, Dark */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <button
+                  onClick={() => onUpdateSettings?.({ theme: 'light' })}
+                  title="Light Theme"
+                  aria-label="Light Theme"
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    backgroundColor: '#FAF8F5',
+                    border: settings.theme === 'light' ? '2px solid var(--accent-gold)' : '1px solid #CCC',
+                    cursor: 'pointer',
+                  }}
+                />
+                <button
+                  onClick={() => onUpdateSettings?.({ theme: 'sepia' })}
+                  title="Sepia Theme"
+                  aria-label="Sepia Theme"
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    backgroundColor: '#F4ECD8',
+                    border: settings.theme === 'sepia' ? '2px solid var(--accent-gold)' : '1px solid #CCC',
+                    cursor: 'pointer',
+                  }}
+                />
+                <button
+                  onClick={() => onUpdateSettings?.({ theme: 'dark' })}
+                  title="Dark Theme"
+                  aria-label="Dark Theme"
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    backgroundColor: '#141210',
+                    border: settings.theme === 'dark' ? '2px solid var(--accent-gold)' : '1px solid #555',
+                    cursor: 'pointer',
+                  }}
+                />
+              </div>
+            </div>
           ) : (
             <div />
           )}
 
-          {/* Action buttons: Marks & Bookmarks */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {/* Action buttons: Focus Mode, Finish Chapter, Marks & Bookmarks */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {/* Focus Mode button */}
+            <button
+              className="secondary-btn"
+              onClick={() => {
+                setIsFocusMode(true);
+                showToast('✦ Focus Mode (Press F or Esc to exit)');
+              }}
+              title="Toggle Focus Mode (Press F)"
+              style={{
+                height: 36,
+                padding: '0 10px',
+                fontSize: 12,
+                borderRadius: 10,
+                backgroundColor: 'rgba(26, 23, 20, 0.85)',
+                backdropFilter: 'blur(8px)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+              }}
+            >
+              <Maximize2 size={14} color="var(--accent-gold)" />
+              <span>Focus (F)</span>
+            </button>
+
+            {book.format === 'pdf' && (
+              <button
+                className="secondary-btn"
+                onClick={handleFinishChapter}
+                title="Finish Chapter"
+                style={{
+                  height: 36,
+                  padding: '0 12px',
+                  fontSize: 12,
+                  borderRadius: 10,
+                  backgroundColor: 'rgba(212, 175, 85, 0.15)',
+                  border: '1px solid rgba(212, 175, 85, 0.35)',
+                  color: 'var(--accent-gold)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <Target size={14} color="var(--accent-gold)" />
+                <span>Finish Chapter</span>
+              </button>
+            )}
+
             {onOpenMarks && (
               <button
                 className="secondary-btn"
@@ -602,7 +967,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
           {/* Next Page Button */}
           <button
             className="icon-btn"
-            onClick={() => handlePageChange(currentPage + 1)}
+            onClick={handleNextPageClick}
             disabled={currentPage >= totalPages}
             aria-label="Next Page"
             style={{
@@ -651,6 +1016,46 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
           }}
           onClose={() => setIsJumpModalOpen(false)}
         />
+      )}
+
+      {/* Chapter Action Step Dialog */}
+      {pendingAction && (
+        <ChapterActionDialog
+          bookTitle={book.title}
+          locationLabel={pendingAction.locationLabel}
+          onSave={handleSaveAction}
+          onSkip={handleSkipAction}
+        />
+      )}
+
+      {/* Dictionary Popup on double-click */}
+      {dictionaryWord && (
+        <DictionaryPopup
+          word={dictionaryWord}
+          bookTitle={book.title}
+          onClose={() => setDictionaryWord(null)}
+          onWordSaved={(savedWord) => showToast(`✦ Saved "${savedWord}" to Vocabulary`)}
+        />
+      )}
+
+      {/* Feature 12: Focus Mode Thin Progress Line at bottom */}
+      {isFocusMode && (
+        <div
+          className="focus-progress-line"
+          title={`Page ${currentPage} of ${totalPages} (${Math.round(totalPages > 0 ? (currentPage / totalPages) * 100 : 0)}%) • Press F to exit Focus Mode`}
+          onClick={() => {
+            setIsFocusMode(false);
+            showToast('✦ Exited Focus Mode');
+          }}
+          style={{ cursor: 'pointer', pointerEvents: 'auto' }}
+        >
+          <div
+            className="focus-progress-fill"
+            style={{
+              width: `${Math.min(100, Math.max(0, totalPages > 0 ? (currentPage / totalPages) * 100 : 0))}%`,
+            }}
+          />
+        </div>
       )}
     </div>
   );

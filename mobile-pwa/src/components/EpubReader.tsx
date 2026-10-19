@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import type { ReaderSettings, Mark } from '../types';
 import { parseEpub, type ParsedEpub } from '../services/epubService';
 import { MarkDialog } from './MarkDialog';
-import { Loader2 } from 'lucide-react';
+import { Loader2, ChevronRight } from 'lucide-react';
 
 interface EpubReaderProps {
   blob: Blob;
@@ -15,6 +15,7 @@ interface EpubReaderProps {
   onAddMark: (quote: string, color: string, note: string, chapterIndex: number, scrollY: number) => void;
   onToggleControls: () => void;
   onError: (err: string) => void;
+  onLookupWord?: (word: string) => void;
 }
 
 function applyHighlights(html: string, chapterMarks: Mark[]): string {
@@ -51,6 +52,7 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
   onAddMark,
   onToggleControls,
   onError,
+  onLookupWord,
 }) => {
   const [parsed, setParsed] = useState<ParsedEpub | null>(null);
   const [loading, setLoading] = useState(true);
@@ -59,6 +61,7 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const contentContainerRef = useRef<HTMLDivElement>(null);
+  const selectionTimeoutRef = useRef<any>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -81,6 +84,7 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
     load();
     return () => {
       mounted = false;
+      if (selectionTimeoutRef.current) clearTimeout(selectionTimeoutRef.current);
     };
   }, [blob, onPageCountLoaded, onError]);
 
@@ -102,13 +106,39 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
   }, [currentChapter, onChapterChange]);
 
   const handleSelection = () => {
+    if (selectionTimeoutRef.current) {
+      clearTimeout(selectionTimeoutRef.current);
+    }
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed) return;
     const text = sel.toString().trim();
     if (text.length >= 2) {
       const scrollY = scrollContainerRef.current?.scrollTop || 0;
       setSavedScrollY(scrollY);
-      setSelectedQuote(text);
+
+      // If single word without spaces, delay opening MarkDialog so double-click can trigger dictionary popup instead
+      if (!text.includes(' ') && text.length <= 40) {
+        selectionTimeoutRef.current = setTimeout(() => {
+          setSelectedQuote(text);
+        }, 280);
+      } else {
+        setSelectedQuote(text);
+      }
+    }
+  };
+
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    if (selectionTimeoutRef.current) {
+      clearTimeout(selectionTimeoutRef.current);
+    }
+    const sel = window.getSelection();
+    const raw = sel ? sel.toString().trim() : '';
+    const clean = raw.replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
+    if (clean && clean.length >= 1 && !clean.includes(' ')) {
+      e.stopPropagation();
+      setSelectedQuote(null);
+      window.getSelection()?.removeAllRanges();
+      onLookupWord?.(clean);
     }
   };
 
@@ -173,37 +203,153 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
   const rawChapter = parsed.chapters[activeChapterIndex];
   const highlightedContent = applyHighlights(rawChapter.content, currentChapterMarks);
 
+  // Feature 12: Injected CSS for themes (Light, Sepia, Dark) and line width
+  const injectedThemeCss = useMemo(() => {
+    const theme = settings.theme || 'dark';
+    const fontSize = settings.fontSize || 18;
+    const lineHeight = settings.lineHeight || 1.6;
+    const lineWidth = settings.lineWidth || 680;
+    const fontFam = settings.fontFamily === 'serif' ? 'var(--font-serif), Georgia, serif' : 'var(--font-ui), sans-serif';
+
+    let bg = '#141210';
+    let text = '#EDE4D3';
+    let heading = '#FAF3E8';
+    let link = '#D4AF55';
+    let border = 'rgba(196, 179, 138, 0.2)';
+    let blockquoteBg = 'rgba(212, 175, 85, 0.08)';
+
+    if (theme === 'light') {
+      bg = '#FAF8F5';
+      text = '#1F1B16';
+      heading = '#110F0C';
+      link = '#9E6B1F';
+      border = 'rgba(120, 100, 70, 0.2)';
+      blockquoteBg = 'rgba(0, 0, 0, 0.04)';
+    } else if (theme === 'sepia') {
+      bg = '#F4ECD8';
+      text = '#3E3120';
+      heading = '#2A1F10';
+      link = '#8A5816';
+      border = 'rgba(140, 110, 70, 0.25)';
+      blockquoteBg = 'rgba(140, 110, 70, 0.1)';
+    }
+
+    return `
+      .epub-themed-scroll {
+        background-color: ${bg} !important;
+        color: ${text} !important;
+        transition: background-color 0.2s ease, color 0.2s ease;
+      }
+      .epub-content-container {
+        max-width: ${lineWidth}px !important;
+        margin: 0 auto !important;
+        font-size: ${fontSize}px !important;
+        line-height: ${lineHeight} !important;
+        font-family: ${fontFam} !important;
+        color: ${text} !important;
+      }
+      .epub-content-container p,
+      .epub-content-container div,
+      .epub-content-container span,
+      .epub-content-container li {
+        font-size: ${fontSize}px !important;
+        line-height: ${lineHeight} !important;
+        font-family: ${fontFam} !important;
+        color: ${text} !important;
+      }
+      .epub-content-container h1,
+      .epub-content-container h2,
+      .epub-content-container h3,
+      .epub-content-container h4,
+      .epub-content-container h5,
+      .epub-content-container h6 {
+        color: ${heading} !important;
+        font-family: ${fontFam} !important;
+      }
+      .epub-content-container a {
+        color: ${link} !important;
+      }
+      .epub-content-container blockquote {
+        border-left: 3px solid ${link} !important;
+        background-color: ${blockquoteBg} !important;
+        padding: 8px 16px !important;
+        margin: 16px 0 !important;
+        color: ${text} !important;
+      }
+      .epub-content-container hr {
+        border: 0 !important;
+        border-top: 1px solid ${border} !important;
+      }
+      .epub-content-container img {
+        max-width: 100% !important;
+        height: auto !important;
+        border-radius: 4px;
+      }
+    `;
+  }, [settings.theme, settings.fontSize, settings.lineHeight, settings.lineWidth, settings.fontFamily]);
+
   return (
     <>
+      <style dangerouslySetInnerHTML={{ __html: injectedThemeCss }} />
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
         onClick={handleContainerClick}
+        onDoubleClick={handleDoubleClick}
         onMouseUp={handleSelection}
         onTouchEnd={handleSelection}
+        className="epub-themed-scroll"
         style={{
           flex: 1,
           width: '100%',
           height: '100%',
           overflowY: 'auto',
           WebkitOverflowScrolling: 'touch',
-          backgroundColor: 'var(--bg-main)',
           padding: '24px 20px calc(40px + var(--safe-bottom)) 20px',
         }}
       >
         <div
           ref={contentContainerRef}
+          onDoubleClick={handleDoubleClick}
+          className="epub-content-container"
           style={{
-            maxWidth: 680,
-            margin: '0 auto',
-            fontSize: `${settings.fontSize}px`,
-            lineHeight: settings.lineHeight,
-            fontFamily: settings.fontFamily === 'serif' ? 'var(--font-serif)' : 'var(--font-ui)',
-            color: 'var(--text-primary)',
             userSelect: 'text',
           }}
           dangerouslySetInnerHTML={{ __html: highlightedContent }}
         />
+
+        {parsed && currentChapter < parsed.totalChapters && (
+          <div
+            style={{
+              maxWidth: settings.lineWidth || 680,
+              margin: '40px auto 20px auto',
+              padding: '24px 20px',
+              borderRadius: 14,
+              backgroundColor: 'var(--bg-surface)',
+              border: '1px solid var(--border-subtle)',
+              textAlign: 'center',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 12,
+            }}
+          >
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px' }}>
+              ✦ Chapter {currentChapter} Complete
+            </div>
+            <button
+              className="primary-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                onChapterChange(currentChapter + 1, 0);
+              }}
+              style={{ padding: '10px 24px', fontSize: 14 }}
+            >
+              <span>Next Chapter</span>
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        )}
       </div>
 
       {selectedQuote && (

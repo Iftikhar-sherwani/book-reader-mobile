@@ -125,12 +125,19 @@ export const PdfReader: React.FC<PdfReaderProps> = ({
     onToggleControls();
   };
 
-  // Determine filter class based on settings
+  // Determine filter class based on theme and settings
   let filterClass = '';
-  if (settings.pdfPageFilter === 'warm') {
+  if (settings.theme === 'dark') {
+    // Invert plus a slight warm shift for Dark
+    filterClass = 'pdf-theme-dark';
+  } else if (settings.theme === 'sepia') {
+    filterClass = 'pdf-theme-sepia';
+  } else if (settings.pdfPageFilter === 'warm') {
     filterClass = 'pdf-filter-warm';
   } else if (settings.pdfPageFilter === 'night') {
     filterClass = 'pdf-filter-night';
+  } else {
+    filterClass = 'pdf-theme-light';
   }
 
   return (
