@@ -1,5 +1,5 @@
 import fitz
-from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, pyqtSignal, QTimer, QRectF, QPointF
+from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, pyqtSignal, QTimer, QRectF, QPointF, QRect, QSize, QPoint, QEvent
 from ui.epub_reader_widget import EpubReaderWidget
 from PyQt6.QtGui import (
     QAction,
@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QRubberBand,
     QScrollBar,
     QScrollArea,
     QTextEdit,
@@ -91,28 +92,61 @@ class PdfPageView(QLabel):
     """An interactive PDF page widget supporting text selection, highlighting, and vocabulary saving."""
     highlight_added = pyqtSignal()
     word_saved = pyqtSignal()
+    mark_added = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Requirement 5: The pixmap must be anchored at the top-left
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.setMouseTracking(True)
 
         self.book_id: str | None = None
+        self.book_title: str = ""
         self.page_index: int = 0
+        self.scale: float = 1.0
+        self.pdf_page: fitz.Page | None = None
         self.word_boxes: list[dict] = []
+        self._cached_highlights: list = []
 
-        self.selecting = False
-        self.press_pos = None
-        self.current_pos = None
+        self.is_dragging = False
+        self.origin = QPoint()
         self.selected_words: list[dict] = []
         self.selected_text: str = ""
 
-    def set_page_data(self, book_id: str | None, page_index: int, words: list, scale: float):
+        # Requirement 2: QRubberBand for drag selection
+        self.rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self.rubber_band.setStyleSheet("""
+            QRubberBand {
+                background-color: rgba(212, 175, 85, 0.35);
+                border: 1px solid #D4AF55;
+            }
+        """)
+
+    def set_page_data(
+        self,
+        book_id: str | None,
+        page_index: int,
+        words: list,
+        scale: float,
+        pixmap: QPixmap,
+        page: fitz.Page | None = None,
+        book_title: str = "",
+    ):
+        """Update page data and cached pixmap only when page/zoom/theme changes."""
         self.book_id = book_id
+        self.book_title = book_title
         self.page_index = page_index
+        self.scale = scale
+        self.pdf_page = page
         self.selected_words = []
         self.selected_text = ""
-        self.selecting = False
+        self.is_dragging = False
+        if self.rubber_band.isVisible():
+            self.rubber_band.hide()
+
+        # Anchor pixmap at top-left and ensure widget matches pixmap size
+        self.setPixmap(pixmap)
+        self.setFixedSize(pixmap.size())
 
         boxes = []
         for i, w in enumerate(words):
@@ -120,79 +154,223 @@ class PdfPageView(QLabel):
             rect = QRectF(w[0] * scale, w[1] * scale, (w[2] - w[0]) * scale, (w[3] - w[1]) * scale)
             boxes.append({'word': w[4], 'rect': rect, 'idx': i, 'line': w[6]})
         self.word_boxes = boxes
+
+        self._load_highlights()
         self.update()
 
-    def _word_at_pos(self, pos) -> int | None:
-        if not pos:
-            return None
-        pt = QPointF(pos)
-        for wb in self.word_boxes:
-            if wb['rect'].contains(pt):
-                return wb['idx']
-        closest_idx = None
-        min_dist = 9999.0
-        for wb in self.word_boxes:
-            r = wb['rect']
-            if r.top() - 15 <= pt.y() <= r.bottom() + 15:
-                dist = abs(r.center().x() - pt.x())
-                if dist < min_dist:
-                    min_dist = dist
-                    closest_idx = wb['idx']
-        return closest_idx
+    def _load_highlights(self):
+        if self.book_id:
+            try:
+                self._cached_highlights = database.get_highlights(self.book_id)
+            except Exception:
+                self._cached_highlights = []
+        else:
+            self._cached_highlights = []
+
+    # ── Requirement 5: Coordinate offsets ──────────────────────────────
+    def get_pixmap_origin(self) -> QPoint:
+        """Return the top-left offset of the rendered pixmap inside this widget."""
+        pix = self.pixmap()
+        if not pix or pix.isNull():
+            return QPoint(0, 0)
+        ox = 0
+        oy = 0
+        if self.alignment() & Qt.AlignmentFlag.AlignHCenter:
+            ox = max(0, (self.width() - pix.width()) // 2)
+        elif self.alignment() & Qt.AlignmentFlag.AlignRight:
+            ox = max(0, self.width() - pix.width())
+        if self.alignment() & Qt.AlignmentFlag.AlignVCenter:
+            oy = max(0, (self.height() - pix.height()) // 2)
+        elif self.alignment() & Qt.AlignmentFlag.AlignBottom:
+            oy = max(0, self.height() - pix.height())
+        return QPoint(ox, oy)
+
+    def to_pixmap_coords(self, pt: QPoint) -> QPoint:
+        """Measure coordinates from pixmap origin, not widget origin."""
+        origin = self.get_pixmap_origin()
+        return QPoint(pt.x() - origin.x(), pt.y() - origin.y())
+
+    def to_pdf_coords(self, pt: QPoint) -> fitz.Point:
+        """Convert widget coordinate to PDF coordinate (divide by zoom factor)."""
+        pix_pt = self.to_pixmap_coords(pt)
+        s = self.scale if self.scale > 0 else 1.0
+        return fitz.Point(pix_pt.x() / s, pix_pt.y() / s)
+
+    def scroll_area_to_pdf_coords(self, scroll_pos: QPoint) -> fitz.Point:
+        """If page is centered inside a scroll area/container, subtract that offset."""
+        pos_in_label = scroll_pos - self.pos()
+        return self.to_pdf_coords(pos_in_label)
+
+    # ── Mouse Interaction ─────────────────────────────────────────────
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.selecting = True
-            self.press_pos = event.pos()
-            self.current_pos = event.pos()
-            self.selected_words = []
-            self.selected_text = ""
-            self.update()
+            self.origin = event.pos()
+            self.is_dragging = True
+            pdf_pt = self.to_pdf_coords(self.origin)
+            # Requirement 6: Log event type, widget coordinates, PDF coordinates
+            print(f"[PDF View] mousePressEvent: widget=({self.origin.x()}, {self.origin.y()}), PDF=({pdf_pt.x:.2f}, {pdf_pt.y:.2f})")
+            self.rubber_band.setGeometry(QRect(self.origin, QSize()))
+            self.rubber_band.show()
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self.selecting and self.press_pos:
-            self.current_pos = event.pos()
-            start_idx = self._word_at_pos(self.press_pos)
-            end_idx = self._word_at_pos(self.current_pos)
-
-            if start_idx is not None and end_idx is not None:
-                i1, i2 = min(start_idx, end_idx), max(start_idx, end_idx)
-                self.selected_words = self.word_boxes[i1:i2+1]
-            else:
-                sel_rect = QRectF(self.press_pos, self.current_pos).normalized()
-                self.selected_words = [wb for wb in self.word_boxes if sel_rect.intersects(wb['rect'])]
-
-            self.selected_text = " ".join(wb['word'] for wb in self.selected_words)
-            self.update()
+        if self.is_dragging and (event.buttons() & Qt.MouseButton.LeftButton):
+            curr_pos = event.pos()
+            rect = QRect(self.origin, curr_pos).normalized()
+            # Requirement 2: Draw selection with QRubberBand
+            self.rubber_band.setGeometry(rect)
+            pdf_pt = self.to_pdf_coords(curr_pos)
+            # Requirement 6: Log event type, widget coordinates, PDF coordinates
+            print(f"[PDF View] mouseMoveEvent: widget=({curr_pos.x()}, {curr_pos.y()}), PDF=({pdf_pt.x:.2f}, {pdf_pt.y:.2f})")
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.selecting = False
-            self.update()
+        if event.button() == Qt.MouseButton.LeftButton and self.is_dragging:
+            self.is_dragging = False
+            self.rubber_band.hide()
+
+            release_pos = event.pos()
+            pdf_release = self.to_pdf_coords(release_pos)
+            rect = QRect(self.origin, release_pos).normalized()
+            drag_dist = (release_pos - self.origin).manhattanLength()
+
+            # Requirement 6: Log event type, widget coordinates, PDF coordinates
+            print(f"[PDF View] mouseReleaseEvent: widget=({release_pos.x()}, {release_pos.y()}), PDF=({pdf_release.x:.2f}, {pdf_release.y:.2f}), drag_dist={drag_dist}")
+
+            # Requirement 3: If drag is under 5 pixels, treat as plain click and do nothing
+            if drag_dist < 5 or rect.width() < 5 or rect.height() < 5:
+                print("[PDF View] Drag under 5 pixels, treating as plain click -> doing nothing.")
+                event.accept()
+                return
+
+            # Requirement 3: Convert rectangle to PDF coordinates (divide by zoom factor)
+            p1 = self.to_pdf_coords(rect.topLeft())
+            p2 = self.to_pdf_coords(rect.bottomRight())
+            pdf_rect = fitz.Rect(min(p1.x, p2.x), min(p1.y, p2.y), max(p1.x, p2.x), max(p1.y, p2.y))
+
+            # Requirement 3: Read text with page.get_textbox(rect)
+            extracted_text = ""
+            if self.pdf_page:
+                try:
+                    extracted_text = self.pdf_page.get_textbox(pdf_rect).strip()
+                except Exception as exc:
+                    print(f"[PDF View] Error in get_textbox: {exc}")
+
+            # Requirement 6: Log extracted text
+            print(f"[PDF View] Extracted text: rect_widget={rect}, rect_pdf=({pdf_rect.x0:.2f}, {pdf_rect.y0:.2f}, {pdf_rect.x1:.2f}, {pdf_rect.y1:.2f}), text='{extracted_text}'")
+
+            # Requirement 3: If text exists, open the mark popup
+            if extracted_text:
+                self.selected_text = extracted_text
+                self._open_mark_dialog(extracted_text)
+
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            idx = self._word_at_pos(event.pos())
-            if idx is not None and idx < len(self.word_boxes):
-                word = self.word_boxes[idx]['word']
+            click_pos = event.pos()
+            pdf_pt = self.to_pdf_coords(click_pos)
+            # Requirement 6: Log event type, widget coordinates, PDF coordinates
+            print(f"[PDF View] mouseDoubleClickEvent: widget=({click_pos.x()}, {click_pos.y()}), PDF=({pdf_pt.x:.2f}, {pdf_pt.y:.2f})")
+
+            # Requirement 4: On double-click, convert click point to PDF coordinates,
+            # call page.get_text("words"), and find the word whose rectangle contains the point.
+            matched_word = None
+            if self.pdf_page:
+                try:
+                    words = self.pdf_page.get_text("words")
+                except Exception as exc:
+                    print(f"[PDF View] Error calling get_text('words'): {exc}")
+                    words = []
+
+                for w in words:
+                    # w format: (x0, y0, x1, y1, word, block_no, line_no, word_no)
+                    if w[0] <= pdf_pt.x <= w[2] and w[1] <= pdf_pt.y <= w[3]:
+                        matched_word = w[4]
+                        break
+
+                if not matched_word:
+                    # Small tolerance (4 pt) in case of near miss
+                    min_dist = 9999.0
+                    for w in words:
+                        if (w[0] - 4) <= pdf_pt.x <= (w[2] + 4) and (w[1] - 4) <= pdf_pt.y <= (w[3] + 4):
+                            dist = min(abs(pdf_pt.x - (w[0] + w[2]) / 2), abs(pdf_pt.y - (w[1] + w[3]) / 2))
+                            if dist < min_dist:
+                                min_dist = dist
+                                matched_word = w[4]
+
+            clean_word = ""
+            if matched_word:
+                import string
+                # Requirement 4: Strip punctuation
+                clean_word = matched_word.strip(string.punctuation + "“”‘’—–…\u200b \t\r\n")
+
+            # Requirement 6: Log extracted word
+            print(f"[PDF View] Double-click word found: raw='{matched_word}', clean='{clean_word}'")
+
+            # Requirement 4: Open dictionary popup for that word
+            if clean_word:
                 from ui.dictionary_dialog import DictionaryPopupDialog
-                dlg = DictionaryPopupDialog(word=word, parent=self)
+                dlg = DictionaryPopupDialog(word=clean_word, book_title=self.book_title, parent=self)
+                dlg.word_saved.connect(self.word_saved.emit)
                 dlg.exec()
+                event.accept()
                 return
+
         super().mouseDoubleClickEvent(event)
 
+    def _open_mark_dialog(self, text: str) -> None:
+        """Open the mark dialog for the extracted quote text."""
+        from ui.mark_dialog import MarkDialog
+        dlg = MarkDialog(quote=text, parent=self)
+        if dlg.exec():
+            if getattr(dlg, "action", "mark") == "vocab":
+                import string
+                quote, _, _ = dlg.get_data()
+                target_text = quote.strip() if quote.strip() else text.strip()
+                clean_word = target_text.strip(string.punctuation + "“”‘’—–…\u200b \t\r\n")
+                if clean_word:
+                    from ui.dictionary_dialog import DictionaryPopupDialog
+                    dict_dlg = DictionaryPopupDialog(word=clean_word, book_title=self.book_title, parent=self)
+                    dict_dlg.word_saved.connect(self.word_saved.emit)
+                    dict_dlg.exec()
+                return
+
+            quote, note, color = dlg.get_data()
+            if quote:
+                import db
+                loc = f"{self.page_index}|0"
+                db.add_mark(
+                    book_id=self.book_id or "",
+                    loc=loc,
+                    quote=quote,
+                    note=note,
+                    color=color,
+                )
+                hl = Highlight(
+                    id=0,
+                    book_id=self.book_id or "",
+                    start_pos=0,
+                    end_pos=0,
+                    color=color,
+                    text=quote[:500],
+                    page_index=self.page_index,
+                )
+                database.add_highlight(hl)
+                self._load_highlights()
+                self.update()
+                self.mark_added.emit()
+                self.highlight_added.emit()
 
     def contextMenuEvent(self, event):
-        if not self.selected_text and self.word_boxes:
-            idx = self._word_at_pos(event.pos())
-            if idx is not None:
-                self.selected_words = [self.word_boxes[idx]]
-                self.selected_text = self.word_boxes[idx]['word']
-                self.update()
-
+        has_selection = bool(self.selected_text)
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -218,8 +396,6 @@ class PdfPageView(QLabel):
             }
         """)
 
-        has_selection = bool(self.selected_text)
-
         if has_selection:
             highlight_menu = menu.addMenu("✦  Highlight")
             highlight_menu.setStyleSheet(menu.styleSheet())
@@ -244,46 +420,34 @@ class PdfPageView(QLabel):
             QApplication.clipboard().setText(self.selected_text)
 
     def add_highlight(self, color: str = HIGHLIGHT_COLORS["Yellow"]):
-        if not self.book_id or not self.selected_words:
+        if not self.book_id or not self.selected_text:
             return
-        start_pos = self.selected_words[0]['idx']
-        end_pos = self.selected_words[-1]['idx']
         hl = Highlight(
             id=0,
             book_id=self.book_id,
-            start_pos=start_pos,
-            end_pos=end_pos,
+            start_pos=0,
+            end_pos=0,
             color=color,
             text=self.selected_text[:500],
             page_index=self.page_index,
         )
         database.add_highlight(hl)
+        self._load_highlights()
         self.update()
         self.highlight_added.emit()
 
     def save_selected_word(self):
-        if not self.book_id or not self.selected_text:
+        if not self.selected_text:
             return
-        word = self.selected_text.strip()
-        if not word:
+        import string
+        clean_word = self.selected_text.strip().strip(string.punctuation + "“”‘’—–…\u200b \t\r\n")
+        if not clean_word:
             return
 
-        if self.selected_words:
-            line_no = self.selected_words[0]['line']
-            line_words = [wb['word'] for wb in self.word_boxes if abs(wb['line'] - line_no) <= 1]
-            context = " ".join(line_words)
-        else:
-            context = word
-
-        saved = SavedWord(
-            id=0,
-            book_id=self.book_id,
-            word=word,
-            context=context[:200],
-            note="",
-        )
-        database.add_saved_word(saved)
-        self.word_saved.emit()
+        from ui.dictionary_dialog import DictionaryPopupDialog
+        dlg = DictionaryPopupDialog(word=clean_word, book_title=self.book_title, parent=self)
+        dlg.word_saved.connect(self.word_saved.emit)
+        dlg.exec()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -291,9 +455,8 @@ class PdfPageView(QLabel):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Draw saved highlights for this PDF page
-        if self.book_id and self.page_index is not None:
-            highlights = database.get_highlights(self.book_id)
-            for hl in highlights:
+        if self.book_id and self.page_index is not None and self._cached_highlights:
+            for hl in self._cached_highlights:
                 if hl.page_index == self.page_index:
                     color = QColor(hl.color)
                     color.setAlpha(110)
@@ -301,7 +464,7 @@ class PdfPageView(QLabel):
                     painter.setPen(Qt.PenStyle.NoPen)
 
                     rects_to_draw = []
-                    if 0 <= hl.start_pos <= hl.end_pos and hl.start_pos < len(self.word_boxes):
+                    if 0 <= hl.start_pos <= hl.end_pos and hl.start_pos < len(self.word_boxes) and (hl.start_pos != 0 or hl.end_pos != 0):
                         for wb in self.word_boxes:
                             if hl.start_pos <= wb['idx'] <= hl.end_pos:
                                 rects_to_draw.append(wb['rect'])
@@ -313,14 +476,6 @@ class PdfPageView(QLabel):
 
                     for r in rects_to_draw:
                         painter.drawRoundedRect(r, 2, 2)
-
-        # Draw active mouse selection overlay
-        if self.selected_words:
-            sel_color = QColor(212, 175, 85, 90)
-            painter.setBrush(sel_color)
-            painter.setPen(QPen(QColor(180, 140, 50, 180), 1))
-            for wb in self.selected_words:
-                painter.drawRoundedRect(wb['rect'], 2, 2)
 
         painter.end()
 
@@ -347,6 +502,13 @@ class ReaderWidget(QWidget):
         self._pdf_doc: fitz.Document | None = None
         self._zoom_scale: float = 1.25
         self._fit_width: bool = True
+
+        # Requirement 1: Keep the rendered QPixmap in memory and reuse it
+        self._cached_pixmap: QPixmap | None = None
+        self._cached_page: int | None = None
+        self._cached_scale: float | None = None
+        self._cached_theme: str | None = None
+        self._cached_doc: fitz.Document | None = None
 
         self._epub_chapters: list[str] = []
         self.theme: str = settings_manager.get_setting("theme", "Sepia")
@@ -472,6 +634,7 @@ class ReaderWidget(QWidget):
         self.pdf_label = PdfPageView()
         self.pdf_label.highlight_added.connect(self.highlight_added.emit)
         self.pdf_label.word_saved.connect(self.word_saved.emit)
+        self.pdf_label.mark_added.connect(self.mark_added.emit)
         pdf_layout.addWidget(self.pdf_label)
 
         self.pdf_scroll.setWidget(self.pdf_container)
@@ -482,6 +645,7 @@ class ReaderWidget(QWidget):
         # ── EPUB WebEngine View ──────────────────────────────────────
         self.epub_widget = EpubReaderWidget()
         self.epub_widget.mark_added.connect(self.mark_added.emit)
+        self.epub_widget.word_saved.connect(self.word_saved.emit)
         self.epub_widget.hide()
 
         main_layout.addWidget(self.book_page, 1)
@@ -619,6 +783,12 @@ class ReaderWidget(QWidget):
             except Exception:
                 pass
             self._pdf_doc = None
+
+        self._cached_pixmap = None
+        self._cached_page = None
+        self._cached_scale = None
+        self._cached_theme = None
+        self._cached_doc = None
 
         if self._is_epub and self._epub_chapters:
             # ── EPUB: delegate to EpubReaderWidget ───────────────────
@@ -809,7 +979,18 @@ class ReaderWidget(QWidget):
         self._apply_highlights()
         self._update_nav()
 
-    def _show_pdf_page(self) -> None:
+    def _get_book_title(self) -> str:
+        if self.book_id:
+            try:
+                import db
+                raw = db.get_book(self.book_id)
+                if raw:
+                    return raw.get("title", "")
+            except Exception:
+                pass
+        return ""
+
+    def _show_pdf_page(self, force: bool = False) -> None:
         if not self._pdf_doc or self._total_pages == 0:
             return
 
@@ -832,11 +1013,23 @@ class ReaderWidget(QWidget):
                 scale = self._zoom_scale
 
             scale = max(0.2, min(scale, 5.0))
+            theme = getattr(self, "theme", "Sepia")
+
+            page_changed = (self._current_page != self._cached_page)
+            scale_changed = (self._cached_scale is None or abs(scale - self._cached_scale) > 0.005)
+            theme_changed = (theme != self._cached_theme)
+            doc_changed = (self._pdf_doc != self._cached_doc)
+
+            # Requirement 1: Render ONLY when the page number, zoom, or theme changes.
+            # Keep the rendered QPixmap in memory and reuse it. Mouse press, move, and release
+            # must never trigger a re-render or a new setPixmap call.
+            if not force and not page_changed and not scale_changed and not theme_changed and not doc_changed and self._cached_pixmap is not None:
+                return
+
             pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
             img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
 
             # Apply theme tint for PDF (Feature 12)
-            theme = getattr(self, "theme", "Sepia")
             if theme == "Dark":
                 img.invertPixels()
                 p = QPainter(img)
@@ -851,13 +1044,26 @@ class ReaderWidget(QWidget):
 
             qpix = QPixmap.fromImage(img)
 
-            self.pdf_label.setPixmap(qpix)
-            self.pdf_label.resize(qpix.size())
+            # Keep rendered pixmap in memory
+            self._cached_pixmap = qpix
+            self._cached_page = self._current_page
+            self._cached_scale = scale
+            self._cached_theme = theme
+            self._cached_doc = self._pdf_doc
 
             words = page.get_text("words")
-            self.pdf_label.set_page_data(self.book_id, self._current_page, words, scale)
+            self.pdf_label.set_page_data(
+                book_id=self.book_id,
+                page_index=self._current_page,
+                words=words,
+                scale=scale,
+                pixmap=qpix,
+                page=page,
+                book_title=self._get_book_title(),
+            )
 
-            self.pdf_scroll.verticalScrollBar().setValue(0)
+            if page_changed:
+                self.pdf_scroll.verticalScrollBar().setValue(0)
         except Exception as exc:
             self.pdf_label.setText(f"Error rendering page: {exc}")
 
@@ -1156,19 +1362,14 @@ class ReaderWidget(QWidget):
         if not sel:
             return
         _, _, text = sel
-        word = text.strip()
-        if not word:
+        import string
+        clean_word = text.strip().strip(string.punctuation + "“”‘’—–…\u200b \t\r\n")
+        if not clean_word:
             return
-        context = self._context_sentence(word)
-        saved = SavedWord(
-            id=0,
-            book_id=self.book_id,
-            word=word,
-            context=context,
-            note="",
-        )
-        database.add_saved_word(saved)
-        self.word_saved.emit()
+        from ui.dictionary_dialog import DictionaryPopupDialog
+        dlg = DictionaryPopupDialog(word=clean_word, book_title=getattr(self, "book_title", ""), parent=self)
+        dlg.word_saved.connect(self.word_saved.emit)
+        dlg.exec()
 
     # ── Context menu ──────────────────────────────────────────────────
 
@@ -1235,6 +1436,8 @@ class ReaderWidget(QWidget):
             super().keyPressEvent(event)
 
     def closeEvent(self, event):
+        self._cached_pixmap = None
+        self._cached_doc = None
         if self._pdf_doc:
             try:
                 self._pdf_doc.close()

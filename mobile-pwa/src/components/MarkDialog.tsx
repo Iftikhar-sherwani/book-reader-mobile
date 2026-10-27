@@ -5,6 +5,7 @@ interface MarkDialogProps {
   quote: string;
   onSave: (color: string, note: string) => void;
   onClose: () => void;
+  onLookupVocab?: (word: string) => void;
 }
 
 const COLORS = [
@@ -14,7 +15,7 @@ const COLORS = [
   { value: '#F8BBD0', label: 'Pink', dot: '🩷' },
 ];
 
-export const MarkDialog: React.FC<MarkDialogProps> = ({ quote, onSave, onClose }) => {
+export const MarkDialog: React.FC<MarkDialogProps> = ({ quote, onSave, onClose, onLookupVocab }) => {
   const [selectedColor, setSelectedColor] = useState(COLORS[0].value);
   const [note, setNote] = useState('');
 
@@ -129,6 +130,23 @@ export const MarkDialog: React.FC<MarkDialogProps> = ({ quote, onSave, onClose }
             >
               Cancel
             </button>
+            {onLookupVocab && (
+              <button
+                type="button"
+                className="primary-btn"
+                onClick={() => {
+                  const clean = quote.trim().replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$/g, '');
+                  onLookupVocab(clean || quote.trim());
+                }}
+                style={{
+                  backgroundColor: 'rgba(212, 175, 85, 0.15)',
+                  border: '1px solid var(--accent-gold)',
+                  color: 'var(--accent-gold)',
+                }}
+              >
+                📖 Vocab Lookup
+              </button>
+            )}
             <button type="submit" className="primary-btn" style={{ minWidth: 100 }}>
               Save Mark
             </button>

@@ -38,9 +38,10 @@ class MarkDialog(QDialog):
     def __init__(self, quote: str = "", note: str = "", color: str = "#FFF3B0", parent=None, is_edit: bool = False):
         super().__init__(parent)
         self.setWindowTitle("Edit Note" if is_edit else "Add Mark")
-        self.setFixedWidth(380)
+        self.setFixedWidth(430)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
+        self.action = "mark"
         self.selected_color = color if color in MARK_COLORS.values() else MARK_COLORS["Yellow"]
         self.color_buttons: dict[str, QPushButton] = {}
         self.is_edit = is_edit
@@ -140,6 +141,28 @@ class MarkDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
+        vocab_btn = QPushButton("📖  Vocab Lookup")
+        vocab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        vocab_btn.setToolTip("Look up definition and save to Vocabulary tab")
+        vocab_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(196, 179, 138, 0.12);
+                color: {TEXT_COLOR};
+                border: 1px solid {BORDER_COLOR};
+                border-radius: 6px;
+                padding: 7px 14px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: rgba(212, 175, 85, 0.22);
+                color: {ACCENT_COLOR};
+                border-color: {ACCENT_COLOR};
+            }}
+        """)
+        vocab_btn.clicked.connect(self._on_vocab_clicked)
+        btn_row.addWidget(vocab_btn)
+
         save_btn = QPushButton("Save Mark" if not self.is_edit else "Update Note")
         save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         save_btn.setStyleSheet(f"""
@@ -157,10 +180,18 @@ class MarkDialog(QDialog):
                 border-color: {ACCENT_COLOR};
             }}
         """)
-        save_btn.clicked.connect(self.accept)
+        save_btn.clicked.connect(self._on_save_clicked)
         btn_row.addWidget(save_btn)
 
         layout.addLayout(btn_row)
+
+    def _on_vocab_clicked(self) -> None:
+        self.action = "vocab"
+        self.accept()
+
+    def _on_save_clicked(self) -> None:
+        self.action = "mark"
+        self.accept()
 
     def _select_color(self, hex_code: str) -> None:
         self.selected_color = hex_code

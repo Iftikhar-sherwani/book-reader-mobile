@@ -375,6 +375,8 @@ class MainWindow(QMainWindow):
 
         self.vocabulary_list = QListWidget()
         self.vocabulary_list.setStyleSheet(list_style)
+        self.vocabulary_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.vocabulary_list.customContextMenuRequested.connect(self._show_vocabulary_context_menu)
         self.vocabulary_list.itemClicked.connect(self._jump_to_word)
 
         self.marks_list = QListWidget()
@@ -443,6 +445,16 @@ class MainWindow(QMainWindow):
             font-family: Georgia, 'Palatino Linotype', serif;
         """)
         header_layout.addWidget(self.book_title_label, 1)
+
+        self.progress_label = QLabel("")
+        self.progress_label.setStyleSheet(f"""
+            color: {SIDEBAR_ACCENT};
+            font-size: 11px;
+            letter-spacing: 1.5px;
+            font-weight: 500;
+        """)
+        header_layout.addWidget(self.progress_label)
+        header_layout.addSpacing(12)
 
         btn_header_style = f"""
             QPushButton {{
@@ -1092,13 +1104,20 @@ class MainWindow(QMainWindow):
 
     def _jump_to_mark(self, item: QListWidgetItem) -> None:
         loc = item.data(257)
-        if not loc or "|" not in str(loc):
+        if not loc:
             return
         try:
-            parts = str(loc).split("|", 1)
-            chapter = int(parts[0])
-            scroll_y = float(parts[1])
-            self.reader.epub_widget.go_to_chapter(chapter, scroll_y)
+            if "|" in str(loc):
+                parts = str(loc).split("|", 1)
+                idx = int(parts[0])
+                scroll_y = float(parts[1])
+            else:
+                idx = int(loc)
+                scroll_y = 0.0
+            if self.current_book and self.current_book.format == "epub":
+                self.reader.epub_widget.go_to_chapter(idx, scroll_y)
+            else:
+                self.reader.go_to_page_and_scroll(idx, int(scroll_y))
         except (ValueError, IndexError):
             pass
 

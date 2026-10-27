@@ -84,6 +84,7 @@ class EpubReaderWidget(QWidget):
     """
 
     mark_added = pyqtSignal()
+    word_saved = pyqtSignal()
     chapter_changed = pyqtSignal(int, int)  # (current_chapter, total_chapters)
 
     def __init__(self, parent=None):
@@ -486,6 +487,17 @@ class EpubReaderWidget(QWidget):
 
         dlg = MarkDialog(quote=text, parent=self)
         if dlg.exec():
+            if getattr(dlg, "action", "mark") == "vocab":
+                import string
+                quote, _, _ = dlg.get_data()
+                target_text = quote.strip() if quote.strip() else text.strip()
+                clean_word = target_text.strip(string.punctuation + "“”‘’—–…\u200b \t\r\n")
+                if clean_word:
+                    dlg_dict = DictionaryPopupDialog(word=clean_word, book_title=self.book_title, parent=self)
+                    dlg_dict.word_saved.connect(self.word_saved.emit)
+                    dlg_dict.exec()
+                return
+
             quote, note, color = dlg.get_data()
             if not quote:
                 return
@@ -503,6 +515,7 @@ class EpubReaderWidget(QWidget):
 
     def _on_word_double_clicked(self, word: str) -> None:
         dlg = DictionaryPopupDialog(word=word, book_title=self.book_title, parent=self)
+        dlg.word_saved.connect(self.word_saved.emit)
         dlg.exec()
 
     # ── Navigation ────────────────────────────────────────────────────

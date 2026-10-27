@@ -356,6 +356,11 @@ export const EpubReader: React.FC<EpubReaderProps> = ({
         <MarkDialog
           quote={selectedQuote}
           onSave={handleSaveMark}
+          onLookupVocab={(cleanWord) => {
+            setSelectedQuote(null);
+            window.getSelection()?.removeAllRanges();
+            onLookupWord?.(cleanWord);
+          }}
           onClose={() => {
             setSelectedQuote(null);
             window.getSelection()?.removeAllRanges();
